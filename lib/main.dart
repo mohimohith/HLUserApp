@@ -8,7 +8,9 @@ import 'package:provider/provider.dart';
 import 'package:in_app_update/in_app_update.dart';
 import 'package:flutter/foundation.dart';
 import 'Provider/language_provider.dart';
-import 'SplashScreen/splashScreen.dart';
+import 'core/session/session_manager.dart';
+import 'features/cart/cart_controller.dart';
+import 'features/shell/app_gate.dart';
 
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
@@ -21,18 +23,22 @@ GlobalKey<ScaffoldMessengerState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
+
   // Lock orientation to portrait only
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,
   ]);
-  
+
+  // Restore any persisted auth session (tokens + branch) before first frame so
+  // the Dio interceptors and landing-screen decision have it available.
+  await SessionManager.instance.bootstrap();
+
   if (!kIsWeb) {
     await Firebase.initializeApp();
     FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
   }
-  
+
   runApp(const MyApp());
 }
 
@@ -105,6 +111,8 @@ class _MyAppState extends State<MyApp> {
         return MultiProvider(
           providers: [
             ChangeNotifierProvider(create: (_) => CartProvider()),
+            // Modern server-authoritative cart used by the migrated screens.
+            ChangeNotifierProvider(create: (_) => CartController()),
             ChangeNotifierProvider(create: (_) => LanguageProvider()),
 
           ],
@@ -116,8 +124,8 @@ class _MyAppState extends State<MyApp> {
               colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
               useMaterial3: true,
             ),
-            home: SplashScreen(), // 👈 Update check ke baad splash
-            // home: BottomNavScreen(), // 👈 Update check ke baad splash
+            // Migrated entry: new backend session gate → login / app shell.
+            home: const AppGate(),
           ),
         );
       },

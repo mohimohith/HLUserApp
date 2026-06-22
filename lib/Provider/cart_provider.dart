@@ -146,13 +146,14 @@ class CartProvider with ChangeNotifier {
       final response = await http.get(url);
 
       if (response.statusCode != 200) {
-        clearCart(userId);
+        // Don't clear local data on network failure — keep what we have
         return false;
       }
 
       final data = json.decode(response.body);
 
       if (data['success'] == true && data['cart'] != null) {
+        // Only clear AFTER successful response
         _cartQuantities.remove(userId);
         _cartIds.remove(userId);
 
@@ -175,11 +176,11 @@ class CartProvider with ChangeNotifier {
         notifyListeners();
         return true;
       } else {
-        clearCart(userId);
+        // Don't clear on API failure either — server might be temporarily down
         return false;
       }
     } catch (e) {
-      clearCart(userId);
+      // Don't clear on network error — preserve existing cart data
       return false;
     }
   }

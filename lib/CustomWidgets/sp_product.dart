@@ -45,8 +45,8 @@ class _SpProductState extends State<SpProduct> {
   @override
   void initState() {
     super.initState();
-    fetchDeliveryTime();
-    checkWishlistStatus();
+    // Delivery time is now read from CartProvider in didChangeDependencies
+    // Wishlist check is deferred — only checked when heart icon is tapped
   }
 
   // Helper method to get product name based on selected language
@@ -279,7 +279,19 @@ class _SpProductState extends State<SpProduct> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     final cartProvider = Provider.of<CartProvider>(context, listen: false);
-    cartProvider.refreshCartData(widget.userId,widget.branchId);
+
+    // Read delivery time from CartProvider (set by HomeScreen once)
+    // to avoid N duplicate API calls from every SpProduct
+    final providerTime = cartProvider.deliveryTime;
+    if (providerTime.isNotEmpty && deliveryTime == '17 MIN') {
+      setState(() {
+        deliveryTime = providerTime;
+      });
+    }
+    // Fallback: fetch once if provider doesn't have it yet
+    if (providerTime.isEmpty && deliveryTime == '17 MIN') {
+      fetchDeliveryTime();
+    }
   }
 
   Future<void> updateQuantity(BuildContext context, int variantId, int newQuantity) async {

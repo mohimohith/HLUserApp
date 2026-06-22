@@ -123,19 +123,17 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // Provider changes सुनें
-    final cartProvider = Provider.of<CartProvider>(context, listen: true);
-    // जब भी provider update हो, cart refresh करें
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (userId.isNotEmpty && !isLoading) {
-        _refreshCartData();
-      }
-    });
+    // Provider changes are now handled via the Consumer rebuilds
+    // Auto-refresh removed to prevent:
+    // 1. setState after dispose when navigating away
+    // 2. Wiping provider cart data mid-addToCart
   }
 
   Future<void> _refreshCartData() async {
     if (userId.isNotEmpty) {
-      await fetchCartItems(userId);
+      if (mounted) {
+        await fetchCartItems(userId);
+      }
     }
   }
 
