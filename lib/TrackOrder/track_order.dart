@@ -1,17 +1,18 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:http/http.dart' as http;
+import 'package:intl/intl.dart';
 import '../Help/help_screen.dart';
-import '../utils/api_constants.dart';
+import '../compat/app_state.dart';
+import '../data/repositories/repositories.dart';
 import '../utils/colors.dart';
 
 class TrackOrder extends StatefulWidget {
-  final String status;
+  /// The new-backend order id (cuid) — used to fetch the live order.
   final String orderId;
+  final String status;
   final String userId;
-  final int branchId;
+  final String branchId;
   final VoidCallback? refreshCallback;
 
   const TrackOrder({
@@ -29,164 +30,87 @@ class TrackOrder extends StatefulWidget {
 
 class _TrackOrderState extends State<TrackOrder> {
   int currentStep = 0;
-  String deliveryTime = '0';
   bool isLoading = false;
   String _currentStatus = '';
-  List<dynamic> _allOrders = [];
+
+  /// Branch-admin-set estimated delivery date/time, fetched from the backend.
+  DateTime? _estimatedDeliveryAt;
 
   @override
   void initState() {
     super.initState();
     _currentStatus = widget.status;
     _setCurrentStepFromStatus();
-    fetchDeliveryTime();
-    _fetchLatestOrderStatus();
+    _fetchOrder();
   }
 
-  // ✅ API se latest order status fetch karega
-  Future<void> _fetchLatestOrderStatus() async {
+  /// Fetches the live order (status + estimated delivery) from the new backend,
+  /// replacing the legacy per-card PHP calls.
+  Future<void> _fetchOrder() async {
+    if (widget.orderId.isEmpty) return;
     try {
-      final response = await http.post(
-        Uri.parse(ApiConstants.GET_ORDER_BY_USER),
-        body: {
-          "user_id": widget.userId,
-          "branch_id": widget.branchId.toString(),
-        },
-      );
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        setState(() {
-          _allOrders = (data["orders"] ?? []) as List;
-
-          // Current order ka latest status find kare
-          final currentOrder = _allOrders.firstWhere(
-                (order) => (order["order"]?["id"]?.toString() ?? order["order"]?["order_id"]?.toString()) == widget.orderId,
-            orElse: () => null,
-          );
-
-          if (currentOrder != null) {
-            final latestStatus = currentOrder["order"]?["status"]?.toString() ?? widget.status;
-            _currentStatus = latestStatus;
-            _setCurrentStepFromStatus();
-          }
-        });
-      }
+      final order = await Repos.orders.getById(widget.orderId);
+      if (!mounted) return;
+      setState(() {
+        _currentStatus = order.status;
+        _estimatedDeliveryAt = order.estimatedDeliveryAt;
+        _setCurrentStepFromStatus();
+      });
     } catch (e) {
-      debugPrint("Error fetching latest order status: $e");
+      debugPrint("Error fetching order: $e");
     }
   }
 
-  // ✅ Complete refresh function
   Future<void> refreshData() async {
-    setState(() {
-      isLoading = true;
-    });
-
+    setState(() => isLoading = true);
     try {
-      // 1. Latest order status fetch kare
-      await _fetchLatestOrderStatus();
-
-      // 2. Delivery time update kare
-      await fetchDeliveryTime();
-
-      // 3. Parent ko refresh ke liye notify kare
-      if (widget.refreshCallback != null) {
-        widget.refreshCallback!();
-      }
-
-      // Success message show kare
+      await _fetchOrder();
+      widget.refreshCallback?.call();
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
+        const SnackBar(
           content: Text('Order status updated'),
           duration: Duration(seconds: 2),
           backgroundColor: Colors.green,
         ),
       );
     } catch (e) {
-      // Error message show kare
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
+        const SnackBar(
           content: Text('Failed to update status'),
           duration: Duration(seconds: 2),
           backgroundColor: Colors.red,
         ),
       );
     } finally {
-      setState(() {
-        isLoading = false;
-      });
+      if (mounted) setState(() => isLoading = false);
     }
   }
 
-  Future<void> fetchDeliveryTime() async {
-    try {
-      final url = Uri.parse(
-        "${ApiConstants.DELIVERY_TIME}?branch_id=${widget.branchId}",
-      );
-
-      debugPrint("Delivery Time API URL: $url");
-
-      final response = await http.get(url);
-
-      debugPrint("Delivery Time Response: ${response.body}");
-
-      if (response.statusCode != 200) {
-        setState(() {
-          deliveryTime = 'Server Error';
-        });
-        return;
-      }
-
-      final data = jsonDecode(response.body);
-
-      final success = data['success'] == true ||
-          data['success'] == 1 ||
-          data['success'] == "true";
-
-      if (success && data['data'] != null) {
-        setState(() {
-          deliveryTime = data['data']['time'].toString();
-        });
-      } else {
-        setState(() {
-          deliveryTime = 'Not available';
-        });
-      }
-    } catch (e) {
-      debugPrint("Delivery Time Error: $e");
-      setState(() {
-        deliveryTime = 'Error';
-      });
-    }
-  }
-
+  /// Maps the backend order status enum onto the 4-step tracking timeline.
   void _setCurrentStepFromStatus() {
-    final status = _currentStatus.toLowerCase();
-    switch (status) {
-      case "pending":
+    switch (_currentStatus.toUpperCase()) {
+      case "PENDING":
+      case "CONFIRMED":
         currentStep = 0;
         break;
-      case "packed":
+      case "PREPARING":
         currentStep = 1;
         break;
-      case "way":
+      case "OUT_FOR_DELIVERY":
         currentStep = 2;
         break;
-      case "delivered":
+      case "DELIVERED":
+      case "CANCELLED":
         currentStep = 3;
-        break;
-      case "completed":
-        currentStep = 3;
-        break;
-      case "cancelled":
-      case "canceled":
-        currentStep = 3; // Cancelled bhi last step mein dikhega
         break;
       default:
         currentStep = 0;
     }
   }
+
+  bool get _isCancelled => _currentStatus.toUpperCase() == 'CANCELLED';
 
   @override
   Widget build(BuildContext context) {
@@ -205,7 +129,7 @@ class _TrackOrderState extends State<TrackOrder> {
               color: AppColors.backgroundColor,
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withOpacity(0.1),
+                  color: Colors.black.withValues(alpha: 0.1),
                   offset: Offset(0, 4.h),
                   blurRadius: 6.r,
                   spreadRadius: 1.r,
@@ -227,7 +151,8 @@ class _TrackOrderState extends State<TrackOrder> {
                     child: Center(
                       child: Padding(
                         padding: EdgeInsets.only(left: 7.w),
-                        child: Icon(Icons.arrow_back_ios, color: AppColors.iconColor, size: 15.sp),
+                        child: Icon(Icons.arrow_back_ios,
+                            color: AppColors.iconColor, size: 15.sp),
                       ),
                     ),
                   ),
@@ -248,18 +173,18 @@ class _TrackOrderState extends State<TrackOrder> {
                   onPressed: refreshData,
                   icon: isLoading
                       ? SizedBox(
-                    width: 20.sp,
-                    height: 20.sp,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: AppColors.searchBorderHome,
-                    ),
-                  )
+                          width: 20.sp,
+                          height: 20.sp,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: AppColors.searchBorderHome,
+                          ),
+                        )
                       : Icon(
-                    Icons.refresh,
-                    color: AppColors.searchBorderHome,
-                    size: 22.sp,
-                  ),
+                          Icons.refresh,
+                          color: AppColors.searchBorderHome,
+                          size: 22.sp,
+                        ),
                 ),
 
                 SizedBox(width: 8.w),
@@ -267,7 +192,8 @@ class _TrackOrderState extends State<TrackOrder> {
                 // Help Button
                 InkWell(
                   onTap: () {
-                    Navigator.push(context, MaterialPageRoute(builder: (context) => HelpScreen()));
+                    Navigator.push(context,
+                        MaterialPageRoute(builder: (context) => HelpScreen()));
                   },
                   child: Container(
                     height: 25.h,
@@ -276,7 +202,8 @@ class _TrackOrderState extends State<TrackOrder> {
                       borderRadius: BorderRadius.circular(100.r),
                     ),
                     child: Center(
-                      child: Icon(Icons.help_outline, color: AppColors.searchBorderHome, size: 22.sp),
+                      child: Icon(Icons.help_outline,
+                          color: AppColors.searchBorderHome, size: 22.sp),
                     ),
                   ),
                 ),
@@ -296,15 +223,13 @@ class _TrackOrderState extends State<TrackOrder> {
               ),
             ),
 
-
-
           // Estimated Delivery Card
           Padding(
             padding: EdgeInsets.only(left: 20.w, right: 20.w, top: 20.h),
             child: Container(
               width: double.infinity,
               decoration: BoxDecoration(
-                color: AppColors.primaryColor.withOpacity(0.1),
+                color: AppColors.primaryColor.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(12.r),
                 border: Border.all(
                   color: AppColors.primaryColor,
@@ -313,39 +238,7 @@ class _TrackOrderState extends State<TrackOrder> {
               ),
               child: Padding(
                 padding: EdgeInsets.all(16.w),
-                child: Column(
-                  children: [
-                    Text(
-                      "Estimated Delivery",
-                      style: GoogleFonts.jost(fontSize: 12.sp, color: Colors.black),
-                    ),
-                    SizedBox(height: 4.h),
-
-                    // Delivery Time Text
-                    Text(
-                      deliveryTime == "1" ? "close" : formatDeliveryTime(deliveryTime),
-                      style: GoogleFonts.jost(
-                        fontSize: 36.sp,
-                        fontWeight: FontWeight.bold,
-                        color: deliveryTime == "1" ? Colors.red : AppColors.searchBorderHome,
-                      ),
-                    ),
-
-                    // Agar deliveryTime 1 hai to "Minutes" hide karo
-                    if (deliveryTime != "1")
-                      Text(
-                        "Minutes",
-                        style: GoogleFonts.jost(
-                          fontSize: 16.sp,
-                          color: AppColors.searchBorderHome,
-                        ),
-                      ),
-
-                    SizedBox(height: 8.h),
-
-
-                  ],
-                ),
+                child: _buildEstimatedDelivery(),
               ),
             ),
           ),
@@ -373,15 +266,15 @@ class _TrackOrderState extends State<TrackOrder> {
                     stepIndex: 2,
                     icon: "🛵",
                     title: "On the way",
-                    subtitle: "Our delivery partner will soon deliver the product",
+                    subtitle:
+                        "Our delivery partner will soon deliver the product",
                   ),
                   orderStep(
                     stepIndex: 3,
-                    icon: _currentStatus.toLowerCase().contains('cancelled') ? "❌" : "✅",
-                    title: _currentStatus.toLowerCase().contains('cancelled')
-                        ? "Order Cancelled"
-                        : "Product Delivered",
-                    subtitle: _currentStatus.toLowerCase().contains('cancelled')
+                    icon: _isCancelled ? "❌" : "✅",
+                    title:
+                        _isCancelled ? "Order Cancelled" : "Product Delivered",
+                    subtitle: _isCancelled
                         ? "Your order has been cancelled"
                         : "Your order has been delivered to your provided address.",
                   ),
@@ -391,6 +284,70 @@ class _TrackOrderState extends State<TrackOrder> {
           ),
         ],
       ),
+    );
+  }
+
+  /// The estimated-delivery block: shows the branch-admin date/time as
+  /// "by date : time", or falls back to the branch delivery-time text.
+  Widget _buildEstimatedDelivery() {
+    if (_isCancelled) {
+      return Column(
+        children: [
+          Text("Order Cancelled",
+              style: GoogleFonts.jost(
+                  fontSize: 22.sp,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.red)),
+        ],
+      );
+    }
+
+    final dt = _estimatedDeliveryAt?.toLocal();
+
+    if (dt != null) {
+      final dateStr = DateFormat('dd MMM yyyy').format(dt);
+      final timeStr = DateFormat('h:mm a').format(dt);
+      return Column(
+        children: [
+          Text("Estimated Delivery",
+              style: GoogleFonts.jost(fontSize: 12.sp, color: Colors.black)),
+          SizedBox(height: 6.h),
+          Text("by",
+              style: GoogleFonts.jost(
+                  fontSize: 14.sp, color: AppColors.searchBorderHome)),
+          SizedBox(height: 2.h),
+          Text(
+            "$dateStr  :  $timeStr",
+            textAlign: TextAlign.center,
+            style: GoogleFonts.jost(
+              fontSize: 22.sp,
+              fontWeight: FontWeight.bold,
+              color: AppColors.searchBorderHome,
+            ),
+          ),
+          SizedBox(height: 8.h),
+        ],
+      );
+    }
+
+    // No admin-set time yet → show the branch delivery-time text (e.g. "30 Minutes").
+    final fallback = AppState.deliveryTimeText.trim();
+    return Column(
+      children: [
+        Text("Estimated Delivery",
+            style: GoogleFonts.jost(fontSize: 12.sp, color: Colors.black)),
+        SizedBox(height: 4.h),
+        Text(
+          fallback.isNotEmpty ? fallback : "Not available",
+          textAlign: TextAlign.center,
+          style: GoogleFonts.jost(
+            fontSize: 30.sp,
+            fontWeight: FontWeight.bold,
+            color: AppColors.searchBorderHome,
+          ),
+        ),
+        SizedBox(height: 8.h),
+      ],
     );
   }
 
@@ -412,18 +369,22 @@ class _TrackOrderState extends State<TrackOrder> {
               width: 24.w,
               height: 24.w,
               decoration: BoxDecoration(
-                color: isCompleted ? AppColors.searchBorderHome : Colors.grey[300],
+                color:
+                    isCompleted ? AppColors.searchBorderHome : Colors.grey[300],
                 shape: BoxShape.circle,
               ),
               child: isCompleted
-                  ? Icon(Icons.check, color: AppColors.backgroundColor, size: 16.sp)
+                  ? Icon(Icons.check,
+                      color: AppColors.backgroundColor, size: 16.sp)
                   : null,
             ),
             if (stepIndex != 3)
               Container(
                 width: 3.w,
                 height: 70.h,
-                color: stepIndex < currentStep ? AppColors.primaryColor : Colors.grey[300],
+                color: stepIndex < currentStep
+                    ? AppColors.primaryColor
+                    : Colors.grey[300],
               ),
           ],
         ),
@@ -458,52 +419,5 @@ class _TrackOrderState extends State<TrackOrder> {
         ),
       ],
     );
-  }
-
-  String formatDeliveryTime(String input) {
-    input = input.replaceAll(' ', '');
-    final match = RegExp(r'^(\d+)([a-zA-Z]+)').firstMatch(input);
-
-    if (match != null) {
-      final number = match.group(1) ?? '';
-      final unit = match.group(2)?.substring(0, 0).toUpperCase() ?? '';
-      return '$number $unit';
-    } else {
-      return input.substring(0, input.length.clamp(0, 6)).toUpperCase();
-    }
-  }
-
-  Color _getStatusColor(String status) {
-    final statusLower = status.toLowerCase();
-    if (statusLower.contains('delivered') || statusLower.contains('completed')) {
-      return Colors.green;
-    } else if (statusLower.contains('cancelled') || statusLower.contains('canceled')) {
-      return Colors.red;
-    } else if (statusLower.contains('processing') || statusLower.contains('shipped') || statusLower.contains('way')) {
-      return Colors.orange;
-    } else if (statusLower.contains('packed')) {
-      return Colors.blue;
-    } else {
-      return Colors.orange;
-    }
-  }
-
-  String _getStatusDescription(String status) {
-    final statusLower = status.toLowerCase();
-    if (statusLower.contains('delivered')) {
-      return "Order has been successfully delivered";
-    } else if (statusLower.contains('completed')) {
-      return "Order has been completed";
-    } else if (statusLower.contains('cancelled') || statusLower.contains('canceled')) {
-      return "Order has been cancelled";
-    } else if (statusLower.contains('processing')) {
-      return "Order is being processed";
-    } else if (statusLower.contains('packed')) {
-      return "Order has been packed";
-    } else if (statusLower.contains('way')) {
-      return "Order is on the way";
-    } else {
-      return "Order is pending";
-    }
   }
 }

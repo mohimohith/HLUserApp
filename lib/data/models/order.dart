@@ -46,6 +46,9 @@ class Order {
   final String? deliverySlot;
   final DateTime? placedAt;
   final DateTime? deliveredAt;
+
+  /// Branch-admin-set estimated delivery date/time (null until set).
+  final DateTime? estimatedDeliveryAt;
   final DeliveryAddress? address;
   final List<OrderItem> items;
 
@@ -64,6 +67,7 @@ class Order {
     this.deliverySlot,
     this.placedAt,
     this.deliveredAt,
+    this.estimatedDeliveryAt,
     this.address,
     this.items = const [],
   });
@@ -107,6 +111,8 @@ class Order {
         deliverySlot: asStringOrNull(j['deliverySlot']),
         placedAt: DateTime.tryParse(asString(j['placedAt'])),
         deliveredAt: DateTime.tryParse(asString(j['deliveredAt'])),
+        estimatedDeliveryAt:
+            DateTime.tryParse(asString(j['estimatedDeliveryAt'])),
         address: j['address'] is Map
             ? DeliveryAddress.fromJson(Map<String, dynamic>.from(j['address']))
             : null,

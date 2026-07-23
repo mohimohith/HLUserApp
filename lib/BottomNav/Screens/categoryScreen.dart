@@ -1,12 +1,11 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
 import '../../CategoryViewScreen/categoryViewScreen.dart';
-import '../../utils/api_constants.dart';
+import '../../compat/app_state.dart';
+import '../../compat/legacy_adapters.dart';
+import '../../data/repositories/repositories.dart';
 import '../../utils/colors.dart';
 import '../bottomNavScreen.dart';
 import '../../Provider/language_provider.dart';
@@ -24,54 +23,36 @@ class _CategoryScreenState extends State<CategoryScreen> {
   bool hasError = false;
   String errorMessage = '';
 
-  int branchId = 0;
-  String branchName  = "";
+  String get branchId => AppState.branchIdOrEmpty;
 
   @override
   void initState() {
     super.initState();
-    fetchLocation();
-  }
-
-  Future<void> fetchLocation() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    String? uArea = prefs.getString('user_area_h');
-    String? uCity = prefs.getString('user_city_h');
-    int bId = prefs.getInt('selected_branch_id') ?? 0;
-    String? bName  = prefs.getString('selected_branch_name');
-
-    // agar dono me se koi ek bhi null na ho
-    if ((uArea != null && uArea.trim().isNotEmpty) ||
-        (uCity != null && uCity.trim().isNotEmpty)) {
-      setState(() {
-        branchId = bId;
-        branchName = bName ?? "";
-      });
-
-      await  fetchMainCategoriesWithCategories();
-    }
+    fetchMainCategoriesWithCategories();
   }
 
   Future<void> fetchMainCategoriesWithCategories() async {
-    if (branchId == 0) return; // ⛔ Fix added
+    if (!mounted) return;
+    setState(() {
+      isLoading = true;
+      hasError = false;
+      errorMessage = '';
+    });
 
     try {
-      final url = Uri.parse('${ApiConstants.VIEW_MAIN_CATEGORY_CATEGORY}?branch_id=$branchId');
-      final response = await http.get(url).timeout(const Duration(seconds: 30));
+      final home = await Repos.home.getHome(branchId);
+      // Each Category carries its subCategories; map to the legacy
+      // `{ name, name_telugu, subcategories: [...] }` shape the UI reads.
+      final mapped = home.categories.map((c) {
+        final m = LegacyAdapters.category(c);
+        return {
+          ...m,
+          'subcategories': m['subcategories'],
+        };
+      }).toList();
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-
-        if (data is List) {
-          categories = data;
-        } else if (data is Map && data["success"] == true && data["data"] is List) {
-          categories = data["data"];
-        } else {
-          throw Exception('Invalid Format From API');
-        }
-      } else {
-        throw Exception('Failed: ${response.statusCode}');
-      }
+      if (!mounted) return;
+      categories = mapped;
     } catch (e) {
       hasError = true;
       errorMessage = e.toString();
@@ -81,7 +62,8 @@ class _CategoryScreenState extends State<CategoryScreen> {
     if (mounted) setState(() => isLoading = false);
   }
 
-  void onSubcategoryTap(int categoryId, String categoryImage, String categoryName, int subcategoryId) {
+  void onSubcategoryTap(
+      String categoryId, String categoryImage, String categoryName, String subcategoryId) {
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -176,9 +158,8 @@ class _CategoryScreenState extends State<CategoryScreen> {
           ),
           itemBuilder: (context, subIndex) {
             final subcat = subcategories[subIndex];
-            final imageUrl = subcat['image'] != null
-                ? ApiConstants.BASE_URL+"/category_api/${subcat['image']}"
-                : '';
+            // Absolute image URL from the adapter; use it directly.
+            final imageUrl = (subcat['image'] ?? '').toString();
 
             return Consumer<LanguageProvider>(
               builder: (context, languageProvider, child) {
@@ -195,12 +176,10 @@ class _CategoryScreenState extends State<CategoryScreen> {
                   onTap: () {
                     if (category['id'] != null && subcat['id'] != null) {
                       onSubcategoryTap(
-                        int.tryParse(subcat['id'].toString()) ?? 0,
-                        subcat['image']?.toString() ?? '',
+                        category['id'].toString(),
+                        imageUrl,
                         subcatName,
-                        // subcat['name']?.toString() ?? '',
-                        // subcat['name']?.toString() ?? '',
-                        int.tryParse(category['id'].toString()) ?? 0,
+                        subcat['id'].toString(),
                       );
                     }
                   },

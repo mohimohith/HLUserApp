@@ -1,15 +1,15 @@
-import 'dart:convert';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart';
 import '../LocationScreen/changeLocationScreen.dart';
-import '../utils/api_constants.dart';
+import '../compat/app_state.dart';
+import '../compat/legacy_adapters.dart';
+import '../data/repositories/repositories.dart';
 import '../utils/colors.dart';
 
 class DeliveryAddressScreen extends StatefulWidget {

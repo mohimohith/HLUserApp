@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'package:dotted_line/dotted_line.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -6,8 +5,6 @@ import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:flutter_svg/svg.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:smooth_page_indicator/smooth_page_indicator.dart';
 import 'package:provider/provider.dart';
 import '../BottomNav/Screens/cartScreen.dart';
@@ -17,7 +14,9 @@ import '../Provider/cart_provider.dart';
 import '../Provider/language_provider.dart';
 import '../SearchProduct/search_product.dart';
 import '../SimilarProducts/similar_product.dart';
-import '../utils/api_constants.dart';
+import '../compat/app_state.dart';
+import '../compat/legacy_adapters.dart';
+import '../data/repositories/repositories.dart';
 import '../utils/colors.dart';
 
 
@@ -45,7 +44,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   bool _isLoadingProducts = false;
   bool isLoading = false;
 
-  int branchId = 0;
+  String branchId = '';
   String branchName  = "";
 
   @override
@@ -103,166 +102,77 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   }
 
   Future<void> fetchLocation() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    String? uArea = prefs.getString('user_area_h');
-    String? uCity = prefs.getString('user_city_h');
-    int bId = prefs.getInt('selected_branch_id') ?? 0;
-    String? bName  = prefs.getString('selected_branch_name');
-
-    // agar dono me se koi ek bhi null na ho
-    if ((uArea != null && uArea.trim().isNotEmpty) ||
-        (uCity != null && uCity.trim().isNotEmpty)) {
-      setState(() {
-        branchId = bId;
-        branchName = bName ?? "";
-      });
-
-      await  _fetchCoupons();
-      await fetchAllProductsFromCategory();
-      await fetchDeliveryTime();
-    }
+    branchId = AppState.branchIdOrEmpty;
+    branchName = AppState.branchName ?? '';
+    _fetchCoupons();
+    await fetchAllProductsFromCategory();
+    deliveryTime = AppState.deliveryTimeText.isNotEmpty ? AppState.deliveryTimeText : '17 MIN';
   }
 
   Future<void> fetchUserData() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    String? user_ID = prefs.getString('user_id');
-    if (user_ID != null) {
-      setState(() => userID = user_ID);
-      await fetchCartQuantities(user_ID);
+    final uid = AppState.userId;
+    if (uid.isNotEmpty) {
+      setState(() => userID = uid);
+      await fetchCartQuantities(uid);
     }
   }
-
-
 
   Future<void> fetchCartQuantities(String userId) async {
-    if (userId.isEmpty || branchId <= 0) {
-      Provider.of<CartProvider>(context, listen: false)
-          .clearCart(userId);
-      return;
-    }
-
-    final url = Uri.parse(
-      '${ApiConstants.GET_CART_ITEMS}?user_id=$userId&branch_id=$branchId',
-    );
-
+    if (userId.isEmpty || branchId.isEmpty) return;
     try {
-      final response = await http.get(url);
-      final data = json.decode(response.body);
-
-      final cartProvider = Provider.of<CartProvider>(context, listen: false);
-
-      if (data['success'] == true && data['cart'] != null) {
-        cartProvider.clearCart(userId);
-
-        for (var item in data['cart']) {
-          cartProvider.updateCartQuantities(
-            userId,
-            item['product_id'].toString(),
-            item['variant_id'].toString(),
-            int.parse(item['quantity'].toString()),
-            int.parse(item['id'].toString()),
-          );
-        }
-      } else {
-        cartProvider.clearCart(userId);
+      final cart = await Repos.cart.getCart(branchId);
+      final cp = Provider.of<CartProvider>(context, listen: false);
+      cp.clearCart(userId);
+      for (final item in cart.items) {
+        cp.updateCartQuantities(
+            userId, item.productId, item.variantId ?? '',
+            item.quantity, item.id);
       }
-    } catch (e) {
-      Provider.of<CartProvider>(context, listen: false)
-          .clearCart(userId);
+    } catch (_) {
+      Provider.of<CartProvider>(context, listen: false).clearCart(userId);
     }
   }
-
 
   Future<void> addToCart() async {
     final variant = widget.product['variants'][selectedVariantIndex];
     final int stock = int.tryParse(variant['stock']?.toString() ?? '0') ?? 0;
-
-    // 🛑 Stock check
     if (stock <= 0) {
       Fluttertoast.showToast(
         msg: getText("This product is out of stock!", "ఈ ఉత్పత్తి స్టాక్లో లేదు!"),
-        toastLength: Toast.LENGTH_SHORT,
-        gravity: ToastGravity.BOTTOM,
-        backgroundColor: Colors.red,
-        textColor: Colors.white,
+        toastLength: Toast.LENGTH_SHORT, gravity: ToastGravity.BOTTOM,
+        backgroundColor: Colors.red, textColor: Colors.white,
       );
       return;
     }
-
-    setState(() {
-      isLoading = true;
-    });
-
+    setState(() => isLoading = true);
     try {
       final variantId = variant['id'].toString();
-      final productId = widget.product['id'].toString();
-
-      // ✅ Image URL handle karo
-      final imageUrl = (widget.product['images'] != null &&
-          widget.product['images'].isNotEmpty)
-          ? ApiConstants.BASE_URL + '/product_api_project/' + widget.product['images'][0]
-          : '';
-
-      final url = Uri.parse(ApiConstants.ADD_TO_CART);
-
-      // ✅ API Call
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: json.encode({
-          'user_id': userID.toString(),
-          'product_id': productId,
-          'variant_id': variantId,
-          'quantity': 1,
-          'image_url': imageUrl,
-          'branch_id' : branchId.toString(),
-        }),
-      );
-
-      final data = json.decode(response.body);
-
-      if (response.statusCode == 200 && data['success'] == true) {
-        final cartProvider = Provider.of<CartProvider>(context, listen: false);
-
-        // ✅ CartProvider ko update karo
-        cartProvider.updateCartQuantities(
-          userID,
-          productId,
-          variantId,
-          1,
-          data['cart_id'] ?? 0,
-        );
-
+      final cp = Provider.of<CartProvider>(context, listen: false);
+      final ok = await cp.addItem(
+          userId: userID, branchId: branchId,
+          productId: widget.product['id'].toString(),
+          variantId: variantId);
+      if (ok) {
         Fluttertoast.showToast(
           msg: getText("Added to cart!", "కార్ట్‌కి జోడించబడింది!"),
-          toastLength: Toast.LENGTH_SHORT,
-          gravity: ToastGravity.BOTTOM,
-          backgroundColor: Colors.green,
-          textColor: Colors.white,
+          toastLength: Toast.LENGTH_SHORT, gravity: ToastGravity.BOTTOM,
+          backgroundColor: Colors.green, textColor: Colors.white,
         );
-
       } else {
         Fluttertoast.showToast(
-          msg: data['message'] ?? getText("Failed to add to cart!", "కార్ట్‌కి జోడించడం విఫలమైంది!"),
-          toastLength: Toast.LENGTH_SHORT,
-          gravity: ToastGravity.BOTTOM,
-          backgroundColor: Colors.red,
-          textColor: Colors.white,
+          msg: getText("Failed to add to cart!", "కార్ట్‌కి జోడించడం విఫలమైంది!"),
+          toastLength: Toast.LENGTH_SHORT, gravity: ToastGravity.BOTTOM,
+          backgroundColor: Colors.red, textColor: Colors.white,
         );
       }
     } catch (e) {
-      print("❌ Error adding to cart: $e");
       Fluttertoast.showToast(
         msg: getText("Something went wrong!", "ఏదో తప్పు జరిగింది!"),
-        toastLength: Toast.LENGTH_SHORT,
-        gravity: ToastGravity.BOTTOM,
-        backgroundColor: Colors.red,
-        textColor: Colors.white,
+        toastLength: Toast.LENGTH_SHORT, gravity: ToastGravity.BOTTOM,
+        backgroundColor: Colors.red, textColor: Colors.white,
       );
     } finally {
-      setState(() {
-        isLoading = false;
-      });
+      setState(() => isLoading = false);
     }
   }
 
@@ -270,246 +180,102 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     final variant = widget.product['variants'][selectedVariantIndex];
     final variantId = variant['id'].toString();
     final productId = widget.product['id'].toString();
-
-    setState(() {
-      isLoading = true;
-    });
-
+    final stock = int.tryParse(variant['stock']?.toString() ?? '0') ?? 0;
+    if (newQuantity > stock) {
+      Fluttertoast.showToast(
+        msg: getText("Only $stock items available in stock", "$stock ఐటమ్లు మాత్రమే స్టాక్‌లో అందుబాటులో ఉన్నాయి"),
+        toastLength: Toast.LENGTH_SHORT, gravity: ToastGravity.BOTTOM,
+        backgroundColor: AppColors.errorColor, textColor: Colors.white);
+      return;
+    }
+    setState(() => isLoading = true);
     try {
-      // 🟢 Stock check
-      final stock = int.tryParse(variant['stock']?.toString() ?? '0') ?? 0;
-      if (newQuantity > stock) {
-        Fluttertoast.showToast(
-          msg: getText("Only $stock items available in stock", "$stock ఐటమ్లు మాత్రమే స్టాక్‌లో అందుబాటులో ఉన్నాయి"),
-          toastLength: Toast.LENGTH_SHORT,
-          gravity: ToastGravity.BOTTOM,
-          backgroundColor: AppColors.errorColor,
-          textColor: Colors.white,
-        );
-        return;
-      }
-
-      final cartProvider = Provider.of<CartProvider>(context, listen: false);
-      int cartId = cartProvider.getCartId(userID, productId, variantId);
-
-      // If cartId is 0, try to find it by making a direct API call
-      if (cartId == 0) {
-        cartId = await _findCartIdDirectly(userID, productId, variantId);
-
-        if (cartId == 0) {
-          print("⚠️ Cart item not found in server either");
-          Fluttertoast.showToast(
-            msg: getText("Cart item not found. Please add it again.", "కార్ట్ ఐటం కనుగొనబడలేదు. దయచేసి మళ్లీ జోడించండి."),
-            toastLength: Toast.LENGTH_SHORT,
-            gravity: ToastGravity.BOTTOM,
-            backgroundColor: Colors.red,
-            textColor: Colors.white,
-          );
-          return;
-        }
-      }
-
-      // 🟢 API call to update quantity
-      final url = Uri.parse(ApiConstants.UPDATE_QUANTITY);
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: json.encode({'id': cartId, 'quantity': newQuantity}),
-      );
-
-      final data = json.decode(response.body);
-      if (data['success']) {
-        cartProvider.updateCartQuantities(
-          userID,
-          productId,
-          variantId,
-          newQuantity,
-          cartId,
-        );
-      } else {
-        print("⚠️ Update quantity API failed: ${data['message']}");
+      final cp = Provider.of<CartProvider>(context, listen: false);
+      final ok = await cp.changeQuantity(
+          userId: userID, branchId: branchId,
+          productId: productId, variantId: variantId,
+          quantity: newQuantity);
+      if (!ok) {
         Fluttertoast.showToast(
           msg: getText("Failed to update quantity", "పరిమాణం నవీకరించడం విఫలమైంది"),
-          toastLength: Toast.LENGTH_SHORT,
-          gravity: ToastGravity.BOTTOM,
-          backgroundColor: Colors.red,
-          textColor: Colors.white,
-        );
+          toastLength: Toast.LENGTH_SHORT, gravity: ToastGravity.BOTTOM,
+          backgroundColor: Colors.red, textColor: Colors.white);
       }
     } catch (e) {
-      print('Error updating quantity: $e');
       Fluttertoast.showToast(
         msg: getText("Network error. Please try again.", "నెట్‌వర్క్ లోపం. దయచేసి మళ్లీ ప్రయత్నించండి."),
-        toastLength: Toast.LENGTH_SHORT,
-        gravity: ToastGravity.BOTTOM,
-        backgroundColor: Colors.red,
-        textColor: Colors.white,
-      );
+        toastLength: Toast.LENGTH_SHORT, gravity: ToastGravity.BOTTOM,
+        backgroundColor: Colors.red, textColor: Colors.white);
     } finally {
-      setState(() {
-        isLoading = false;
-      });
+      setState(() => isLoading = false);
     }
-  }
-
-  // Helper method to find cart ID directly from server
-  Future<int> _findCartIdDirectly(String userId, String productId, String variantId) async {
-    try {
-      final url = Uri.parse('${ApiConstants.GET_CART_ITEMS}?user_id=$userId');
-      final response = await http.get(url);
-      final data = json.decode(response.body);
-
-      if (data['success']) {
-        final cartItems = List<Map<String, dynamic>>.from(data['cart'] ?? []);
-
-        for (var item in cartItems) {
-          final itemProductId = item['product_id'].toString();
-          final itemVariantId = item['variant_id'].toString();
-
-          if (itemProductId == productId && itemVariantId == variantId) {
-            return item['id'] as int;
-          }
-        }
-      }
-    } catch (e) {
-      print('Error finding cart ID directly: $e');
-    }
-
-    return 0;
   }
 
   Future<void> removeFromCart() async {
     final variant = widget.product['variants'][selectedVariantIndex];
     final variantId = variant['id'].toString();
     final productId = widget.product['id'].toString();
-
-    setState(() {
-      isLoading = true;
-    });
-
+    setState(() => isLoading = true);
     try {
-      final cartProvider = Provider.of<CartProvider>(context, listen: false);
-      final cartId = cartProvider.getCartId(userID, productId, variantId);
-
-      final url = Uri.parse('${ApiConstants.REMOVE_CART_ITEM}?id=$cartId');
-      final response = await http.get(url);
-      final data = json.decode(response.body);
-
-      if (data['success']) {
-        cartProvider.removeCartItem(userID, productId, variantId);
+      final cp = Provider.of<CartProvider>(context, listen: false);
+      final ok = await cp.removeItem(
+          userId: userID, branchId: branchId,
+          productId: productId, variantId: variantId);
+      if (ok) {
         Fluttertoast.showToast(
           msg: getText("Removed from cart", "కార్ట్ నుండి తీసివేయబడింది"),
-          toastLength: Toast.LENGTH_SHORT,
-          gravity: ToastGravity.BOTTOM,
-          backgroundColor: Colors.green,
-          textColor: Colors.white,
-        );
+          toastLength: Toast.LENGTH_SHORT, gravity: ToastGravity.BOTTOM,
+          backgroundColor: Colors.green, textColor: Colors.white);
       }
     } catch (e) {
-      print('Error removing from cart: $e');
       Fluttertoast.showToast(
         msg: getText("Error removing from cart", "కార్ట్ నుండి తీసివేయడంలో లోపం"),
-        toastLength: Toast.LENGTH_SHORT,
-        gravity: ToastGravity.BOTTOM,
-        backgroundColor: Colors.red,
-        textColor: Colors.white,
-      );
+        toastLength: Toast.LENGTH_SHORT, gravity: ToastGravity.BOTTOM,
+        backgroundColor: Colors.red, textColor: Colors.white);
     } finally {
-      setState(() {
-        isLoading = false;
-      });
+      setState(() => isLoading = false);
     }
   }
 
   Future<void> fetchAllProductsFromCategory() async {
-    debugPrint('Fetching products for category: $CATEGORY_ID');
-
-    setState(() {
-      _isLoadingProducts = true;
-      products = [];
-    });
-
-    // 🔥 Update: branchId must be passed
-    final url = Uri.parse(
-      '${ApiConstants.VIEW_ALL_PRODUCTS_BY_CATEGORY}?category_id=$CATEGORY_ID&branch_id=$branchId',
-    );
-
-    debugPrint('API URL: $url');
-
+    if (CATEGORY_ID.isEmpty) return;
+    setState(() { _isLoadingProducts = true; products = []; });
     try {
-      final res = await http.get(url);
-      debugPrint('Response status: ${res.statusCode}');
-      debugPrint('Response body: ${res.body}');
-
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body);
-        debugPrint('Decoded data: $data');
-
-        setState(() {
-          if (data is List) {
-            products = data;
-          } else if (data['products'] != null) {
-            products = data['products'];
-          } else {
-            products = [];
-          }
-        });
-      } else {
-        setState(() => products = []);
-      }
+      final res = await Repos.products.list(
+          branchId: branchId, categoryId: CATEGORY_ID, page: 1, limit: 50);
+      if (mounted) setState(() => products = LegacyAdapters.products(res.items));
     } catch (e) {
       debugPrint("Error fetching products: $e");
-      setState(() => products = []);
+      if (mounted) setState(() => products = []);
     } finally {
-      setState(() => _isLoadingProducts = false);
-      debugPrint('Final products list: ${products.length} items');
+      if (mounted) setState(() => _isLoadingProducts = false);
     }
   }
 
   Future<void> _fetchCoupons() async {
     try {
-      final response = await http.get(Uri.parse('${ApiConstants.VIEW_COUPON}?branch_id=$branchId'));
-      if (response.statusCode == 200) {
-        final decoded = jsonDecode(response.body);
-        if (decoded['success'] == true && decoded['data'] is List) {
-          setState(() => _couponList = List<Map<String, dynamic>>.from(decoded['data']));
-        }
+      final coupons = await Repos.coupons.available(branchId);
+      if (mounted && coupons.isNotEmpty) {
+        setState(() => _couponList =
+            coupons.map((c) => LegacyAdapters.coupon(c)).toList().cast<Map<String, dynamic>>());
       }
-    } catch (e) {
-      debugPrint("Error fetching coupons: $e");
-    }
+    } catch (e) { debugPrint("Error fetching coupons: $e"); }
   }
 
+  /// Legacy compat — no-op since delivery time comes from AppState.
   Future<void> fetchDeliveryTime() async {
-    try {
-      print("Branch ID inside fetchDeliveryTime: $branchId");
+    deliveryTime = AppState.deliveryTimeText.isNotEmpty
+        ? AppState.deliveryTimeText
+        : '17 MIN';
+  }
 
-      final url = Uri.parse(ApiConstants.DELIVERY_TIME + "?branch_id=$branchId");
-
-      print("API HIT URL: $url");
-
-      final response = await http.get(url);
-      final data = json.decode(response.body);
-
-      print("API RESPONSE: $data");
-
-      if (data['success']) {
-        setState(() {
-          deliveryTime = data['data']['time'].toString();
-        });
-      } else {
-        setState(() {
-          deliveryTime = getText('No time found', 'సమయం కనుగొనబడలేదు');
-        });
-      }
-
-    } catch (e) {
-      print("ERROR IN fetchDeliveryTime: $e");
-
-      setState(() {
-        deliveryTime = getText('Error fetching time', 'సమయం పొందడంలో లోపం');
-      });
-    }
+  void _showSnackBar(String message, Color color) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(message, style: const TextStyle(color: Colors.white)),
+      backgroundColor: color,
+      behavior: SnackBarBehavior.floating,
+      duration: const Duration(seconds: 3),
+    ));
   }
 
 
@@ -582,7 +348,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                             return ClipRRect(
                               borderRadius: BorderRadius.circular(16.r),
                               child: Image.network(
-                                '${ApiConstants.BASE_URL}/product_api_project/${images[index]}',
+                                '${images[index]}',
                                 fit: BoxFit.fill, // Changed to cover for full container
                                 loadingBuilder: (context, child, loadingProgress) {
                                   if (loadingProgress == null) return child;
@@ -1199,8 +965,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                 borderRadius: BorderRadius.circular(5.r),
                                 child: Center(
                                   child: Image.network(
-                                    ApiConstants.BASE_URL +
-                                        '/product_api_project/${widget.product['images'][0]}',
+                                    widget.product['images'][0],
                                     width: 35.w,
                                     height: 35.h,
                                     fit: BoxFit.contain,
@@ -1230,17 +995,11 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                             MaterialPageRoute(
                               builder:
                                   (context) => CategoryViewScreen(
-                                categoryId:
-                                int.tryParse(category_id.toString()) ??
-                                    0,
-                                subCategoryId:
-                                int.tryParse(
-                                  subcategory_id.toString(),
-                                ) ??
-                                    0,
+                                categoryId: category_id.toString(),
+                                subCategoryId: subcategory_id.toString(),
                                 categoryName: category_name,
                                 categoryImage: "",
-                                branchId: branchId,
+                                branchId: branchId.toString(),
                               ),
                             ),
                           );
@@ -1528,8 +1287,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                                     6.0,
                                                   ),
                                                   child: Image.network(
-                                                    ApiConstants.BASE_URL +
-                                                        '/product_api_project/${product['images'][0]}',
+                                                    product['images'][0],
                                                     width: 27.w,
                                                     height: 27.h,
                                                     fit: BoxFit.contain,
@@ -1754,40 +1512,18 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                               });
 
                               try {
-                                final imageUrl =
-                                widget.product['images'].isNotEmpty
-                                    ? ApiConstants.BASE_URL +
-                                    '/product_api_project/' +
-                                    widget.product['images'][0]
-                                    : '';
-
-                                final url = Uri.parse(ApiConstants.ADD_TO_CART);
-                                final response = await http.post(
-                                  url,
-                                  headers: {'Content-Type': 'application/json'},
-                                  body: json.encode({
-                                    'user_id': userID.toString(),
-                                    'product_id': productId,
-                                    'variant_id': variantId,
-                                    'quantity': 1,
-                                    'image_url': imageUrl,
-                                    'branch_id' : branchId.toString()
-                                  }),
-                                );
-
-                                final data = json.decode(response.body);
-                                if (data['success']) {
-                                  final cartProvider =
-                                  Provider.of<CartProvider>(
-                                    context,
-                                    listen: false,
-                                  );
-                                  cartProvider.updateCartQuantities(
-                                    userID,
-                                    productId,
-                                    variantId,
-                                    1,
-                                    data['cart_id'] ?? 0,
+                                // Use CartProvider for server-authoritative cart add
+                                final cp = Provider.of<CartProvider>(context, listen: false);
+                                final ok = await cp.addItem(
+                                    userId: userID, branchId: branchId,
+                                    productId: productId, variantId: variantId);
+                                if (ok) {
+                                  Fluttertoast.showToast(
+                                    msg: getText("Added to cart!", "కార్ట్‌కి జోడించబడింది!"),
+                                    toastLength: Toast.LENGTH_SHORT,
+                                    gravity: ToastGravity.BOTTOM,
+                                    backgroundColor: Colors.green,
+                                    textColor: Colors.white,
                                   );
                                 }
                               } catch (e) {
@@ -2008,7 +1744,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                   return ProductCard(
                     product: product,
                     userId: userID,
-                    branchId: branchId,
+                    branchId: branchId.toString(),
                     onCartUpdated: () {
                       fetchCartQuantities(userID);
                     },

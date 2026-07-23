@@ -387,7 +387,7 @@ class _BrandViewScreenState extends State<BrandViewScreen> {
           return ProductCard(
             product: product,
             userId: userID,
-            branchId: branchId,
+            branchId: branchId.toString(),
             onCartUpdated: () {
               if (userID.isNotEmpty) {
                 fetchCartQuantity(userID); // ✅ Real-time update

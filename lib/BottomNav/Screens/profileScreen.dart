@@ -1,14 +1,11 @@
-// ProfileScreen.dart - ये सारे changes करें
-import 'dart:convert';
+// ProfileScreen.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:flutter_svg/svg.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:nexa_mart/BottomNav/Screens/wishlist_screen.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
-import 'package:provider/provider.dart'; // Add this import
+import 'package:provider/provider.dart';
 import '../../Auth/edit_profile.dart';
 import '../../Auth/loginScreen.dart';
 import '../../Coupon/coupon_screen.dart';
@@ -19,7 +16,8 @@ import '../../ProfileScreen/privacy_policy.dart';
 import '../../ProfileScreen/return_policy.dart';
 import '../../ProfileScreen/terms_condition.dart';
 import '../../Provider/language_provider.dart';
-import '../../utils/api_constants.dart';
+import '../../compat/app_state.dart';
+import '../../data/repositories/repositories.dart';
 import '../../utils/colors.dart';
 import 'order_screen.dart';
 
@@ -79,31 +77,23 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   Future<void> fetchUserData() async {
     setState(() => isLoading = true);
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    String? userID = prefs.getString('user_id');
-    if (userID != null) {
-      setState(() => userId = userID);
+    userId = AppState.userId;
+    if (userId.isNotEmpty) {
       await fetchUserDetails(userId);
     }
     setState(() => isLoading = false);
   }
 
   Future<void> fetchUserDetails(String userId) async {
-    final url = Uri.parse("${ApiConstants.BASE_URL}/auth/get_user.php?userId=$userId");
     try {
-      final response = await http.get(url);
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        if (data["status"] == "success") {
-          setState(() {
-            userName = data["user"]["name"] ?? "";
-            userEmail = data["user"]["email"] ?? "";
-            hasProfileData = userName.isNotEmpty && userEmail.isNotEmpty;
-          });
-        }
-      }
+      final user = await Repos.auth.me();
+      setState(() {
+        userName = (user['name'] ?? '').toString();
+        userEmail = (user['email'] ?? '').toString();
+        hasProfileData = userName.isNotEmpty;
+      });
     } catch (e) {
-      print("Error fetching user details: $e");
+      debugPrint("Error fetching user details: $e");
     }
   }
 
@@ -127,14 +117,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   Future<void> logoutUser() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    // Clear all SharedPreferences data
-    await prefs.clear();
-
+    await Repos.auth.logout();
     if (!mounted) return;
     Navigator.pushReplacement(
       context,
-      MaterialPageRoute(builder: (context) => LoginScreen()),
+      MaterialPageRoute(builder: (context) => const LoginScreen()),
     );
   }
 
@@ -821,28 +808,11 @@ class _CompleteProfileFormState extends State<CompleteProfileForm> {
   }
 
   Future<bool> insertUser(String name, String email) async {
-    final url = Uri.parse(ApiConstants.ADD_USER);
-
     try {
-      final response = await http.post(
-        url,
-        body: {
-          "login_id": widget.userId,
-          "name": name,
-          "email": email,
-          "date_time": DateTime.now().toString(),
-        },
-      );
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data["success"] == "true";
-      } else {
-        print("Server error: ${response.statusCode}");
-        return false;
-      }
+      await Repos.auth.updateProfile(name: name, email: email);
+      return true;
     } catch (e) {
-      print("Error: $e");
+      debugPrint("Error updating profile: $e");
       return false;
     }
   }

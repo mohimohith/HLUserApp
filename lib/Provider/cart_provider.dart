@@ -1,262 +1,246 @@
 import 'package:flutter/foundation.dart';
-import 'dart:convert';
-import 'package:http/http.dart' as http;
-import 'package:flutter/material.dart';
 
-import '../utils/api_constants.dart';
+import '../data/models/cart.dart';
+import '../data/repositories/repositories.dart';
 
+/// Cart state, backed by the server-authoritative `/cart` API (Repos.cart).
+///
+/// The public READ surface (getQuantity / getProductTotalQuantity /
+/// getTotalCartItems / isInCart ...) is kept identical to the old PHP-era
+/// provider so the ported widget trees keep working unchanged. The old inline
+/// `http` mutations are replaced by the async helpers [addItem] /
+/// [changeQuantity] / [removeItem], which call the backend and then resync the
+/// local maps from the returned [Cart].
+///
+/// Quantities are keyed by `"<productId>-<variantId>"`; for each key we also
+/// remember the server cart-item id needed for PATCH/DELETE.
 class CartProvider with ChangeNotifier {
-  // Using a more efficient data structure
   final Map<String, Map<String, int>> _cartQuantities = {};
-  final Map<String, Map<String, int>> _cartIds = {};
+  final Map<String, Map<String, String>> _cartItemIds = {};
 
-  // Shared delivery time - set once to avoid duplicate API calls
-  String _deliveryTime = '';
-  String get deliveryTime => _deliveryTime;
+  String _getCartKey(String productId, String variantId) => '$productId-$variantId';
 
-  void setDeliveryTime(String time) {
-    _deliveryTime = time;
-    notifyListeners();
-  }
+  String _bucket(String userId) => userId.isEmpty ? '_guest' : userId;
 
-  // 🟢 Update cart quantities
-  void updateCartQuantities(
-      String userId,
-      String productId,
-      String variantId,
-      int quantity,
-      int cartId,
-      ) {
-    if (userId.isEmpty) return;
+  // ---------------------------------------------------------------------------
+  // Reads (same signatures as the legacy provider)
+  // ---------------------------------------------------------------------------
 
-    // Initialize user maps if they don't exist
-    _cartQuantities.putIfAbsent(userId, () => {});
-    _cartIds.putIfAbsent(userId, () => {});
-
-    final key = _getCartKey(productId, variantId);
-    _cartQuantities[userId]![key] = quantity;
-    _cartIds[userId]![key] = cartId;
-
-    notifyListeners();
-  }
-
-  // 🟢 Remove item from cart
-  void removeCartItem(String userId, String productId, String variantId) {
-    if (userId.isEmpty) return;
-
-    final key = _getCartKey(productId, variantId);
-    _cartQuantities[userId]?.remove(key);
-    _cartIds[userId]?.remove(key);
-    notifyListeners();
-  }
-
-  // 🟢 Get quantity of a product
   int getQuantity(String userId, String productId, String variantId) {
-    if (userId.isEmpty) return 0;
-
     final key = _getCartKey(productId, variantId);
-    return _cartQuantities[userId]?[key] ?? 0;
+    return _cartQuantities[_bucket(userId)]?[key] ?? 0;
   }
 
-  // 🟢 Get cartId of a product
-  int getCartId(String userId, String productId, String variantId) {
-    if (userId.isEmpty) return 0;
-
+  /// Server cart-item id for a line, or null if it's not in the cart.
+  String? cartItemId(String userId, String productId, String variantId) {
     final key = _getCartKey(productId, variantId);
-    return _cartIds[userId]?[key] ?? 0;
+    return _cartItemIds[_bucket(userId)]?[key];
   }
 
-  // 🟢 Get total quantity of all items for a user
+  /// Legacy shim — old widgets called this to get an int id; no longer used for
+  /// mutations (kept so any stray reference still compiles).
+  int getCartId(String userId, String productId, String variantId) => 0;
+
   int getTotalCartItems(String userId) {
-    if (userId.isEmpty || !_cartQuantities.containsKey(userId)) return 0;
+    final map = _cartQuantities[_bucket(userId)];
+    if (map == null) return 0;
+    var total = 0;
+    map.forEach((_, qty) => total += qty);
+    return total;
+  }
 
-    int total = 0;
-    _cartQuantities[userId]!.forEach((key, qty) {
-      total += qty;
+  int getProductTotalQuantity(String userId, String productId) {
+    final map = _cartQuantities[_bucket(userId)];
+    if (map == null) return 0;
+    var total = 0;
+    map.forEach((key, qty) {
+      if (key.startsWith('$productId-')) total += qty;
     });
     return total;
   }
 
-  // 🟢 Clear cart for specific user
-  void clearCart(String userId) {
-    if (userId.isEmpty) return;
+  bool isInCart(String userId, String productId, String variantId) =>
+      getQuantity(userId, productId, variantId) > 0;
 
-    _cartQuantities.remove(userId);
-    _cartIds.remove(userId);
-    notifyListeners();
+  bool isCartEmpty(String userId) {
+    final map = _cartQuantities[_bucket(userId)];
+    return map == null || map.isEmpty;
   }
 
-  // 🟢 Clear all cart data completely
-  void clearAllCartData() {
-    _cartQuantities.clear();
-    _cartIds.clear();
-    notifyListeners();
+  int getUniqueItemsCount(String userId) =>
+      _cartQuantities[_bucket(userId)]?.length ?? 0;
+
+  List<String> getProductIdsInCart(String userId) {
+    final map = _cartQuantities[_bucket(userId)];
+    if (map == null) return [];
+    final ids = <String>{};
+    for (final key in map.keys) {
+      final parts = key.split('-');
+      if (parts.isNotEmpty) ids.add(parts[0]);
+    }
+    return ids.toList();
   }
 
-  // 🟢 Get cart items as list for a user
+  /// Legacy compat: returns cart items as a list of maps with the old keys.
   List<Map<String, dynamic>> getCartItemsAsList(String userId) {
-    if (userId.isEmpty || !_cartQuantities.containsKey(userId)) return [];
-
-    List<Map<String, dynamic>> items = [];
-
-    _cartQuantities[userId]!.forEach((key, quantity) {
+    final bucket = _bucket(userId);
+    final qty = _cartQuantities[bucket];
+    final ids = _cartItemIds[bucket];
+    if (qty == null) return [];
+    final result = <Map<String, dynamic>>[];
+    qty.forEach((key, quantity) {
       final parts = key.split('-');
       if (parts.length >= 2) {
-        final productId = parts[0];
-        final variantId = parts[1];
-        final cartId = _cartIds[userId]![key] ?? 0;
-
-        items.add({
-          'product_id': productId,
-          'variant_id': variantId,
+        result.add({
+          'product_id': parts[0],
+          'variant_id': parts[1],
           'quantity': quantity,
-          'cart_id': cartId,
+          'cart_id': ids?[key] ?? 0,
         });
       }
     });
-
-    return items;
+    return result;
   }
 
-  // 🟢 Get total quantity of a specific product (across all variants)
-  int getProductTotalQuantity(String userId, String productId) {
-    if (userId.isEmpty || !_cartQuantities.containsKey(userId)) return 0;
+  // ---------------------------------------------------------------------------
+  // Local mutators (kept for compatibility; server is the source of truth)
+  // ---------------------------------------------------------------------------
 
-    int total = 0;
-    _cartQuantities[userId]!.forEach((key, qty) {
-      if (key.startsWith('$productId-')) {
-        total += qty;
-      }
-    });
-    return total;
+  void updateCartQuantities(
+    String userId,
+    String productId,
+    String variantId,
+    int quantity,
+    Object? itemId,
+  ) {
+    final bucket = _bucket(userId);
+    _cartQuantities.putIfAbsent(bucket, () => {});
+    _cartItemIds.putIfAbsent(bucket, () => {});
+    final key = _getCartKey(productId, variantId);
+    _cartQuantities[bucket]![key] = quantity;
+    if (itemId != null) _cartItemIds[bucket]![key] = itemId.toString();
+    notifyListeners();
   }
 
-  // 🟢 Refresh cart data from API
-  Future<bool> refreshCartData(String userId, int branchId) async {
-    if (userId.isEmpty || branchId <= 0) {
+  void removeCartItem(String userId, String productId, String variantId) {
+    final bucket = _bucket(userId);
+    final key = _getCartKey(productId, variantId);
+    _cartQuantities[bucket]?.remove(key);
+    _cartItemIds[bucket]?.remove(key);
+    notifyListeners();
+  }
+
+  void clearCart(String userId) {
+    final bucket = _bucket(userId);
+    _cartQuantities.remove(bucket);
+    _cartItemIds.remove(bucket);
+    notifyListeners();
+  }
+
+  void clearAllCartData() {
+    _cartQuantities.clear();
+    _cartItemIds.clear();
+    notifyListeners();
+  }
+
+  void clearCartData(String userId) => clearCart(userId);
+
+  // ---------------------------------------------------------------------------
+  // Server-backed operations
+  // ---------------------------------------------------------------------------
+
+  void _syncFromCart(String userId, Cart cart) {
+    final bucket = _bucket(userId);
+    final qty = <String, int>{};
+    final ids = <String, String>{};
+    for (final item in cart.items) {
+      final key = _getCartKey(item.productId, item.variantId ?? '');
+      qty[key] = item.quantity;
+      ids[key] = item.id;
+    }
+    _cartQuantities[bucket] = qty;
+    _cartItemIds[bucket] = ids;
+    notifyListeners();
+  }
+
+  /// Pull the authoritative cart for [branchId] and repopulate local maps.
+  Future<bool> refreshCartData(String userId, String branchId) async {
+    if (branchId.isEmpty || userId.isEmpty) {
       clearCart(userId);
       return false;
     }
-
     try {
-      final url = Uri.parse(
-          '${ApiConstants.GET_CART_ITEMS}?user_id=$userId&branch_id=$branchId'
-      );
-
-      final response = await http.get(url);
-
-      if (response.statusCode != 200) {
-        // Don't clear local data on network failure — keep what we have
-        return false;
-      }
-
-      final data = json.decode(response.body);
-
-      if (data['success'] == true && data['cart'] != null) {
-        // Only clear AFTER successful response
-        _cartQuantities.remove(userId);
-        _cartIds.remove(userId);
-
-        _cartQuantities[userId] = {};
-        _cartIds[userId] = {};
-
-        for (var item in data['cart']) {
-          final productId = item['product_id']?.toString() ?? '';
-          final variantId = item['variant_id']?.toString() ?? '';
-          final quantity = int.tryParse(item['quantity']?.toString() ?? '0') ?? 0;
-          final cartId = int.tryParse(item['id']?.toString() ?? '0') ?? 0;
-
-          if (productId.isNotEmpty && variantId.isNotEmpty) {
-            final key = _getCartKey(productId, variantId);
-            _cartQuantities[userId]![key] = quantity;
-            _cartIds[userId]![key] = cartId;
-          }
-        }
-
-        notifyListeners();
-        return true;
-      } else {
-        // Don't clear on API failure either — server might be temporarily down
-        return false;
-      }
-    } catch (e) {
-      // Don't clear on network error — preserve existing cart data
+      final cart = await Repos.cart.getCart(branchId);
+      _syncFromCart(userId, cart);
+      return true;
+    } catch (_) {
       return false;
     }
   }
 
-
-  // 🟢 Check if a product variant is in cart
-  bool isInCart(String userId, String productId, String variantId) {
-    if (userId.isEmpty) return false;
-
-    final key = _getCartKey(productId, variantId);
-    return _cartQuantities[userId]?[key] != null &&
-        (_cartQuantities[userId]![key] ?? 0) > 0;
+  Future<bool> addItem({
+    required String userId,
+    required String branchId,
+    required String productId,
+    required String variantId,
+  }) async {
+    try {
+      final cart = await Repos.cart.add(
+        branchId: branchId,
+        productId: productId,
+        variantId: variantId.isEmpty ? null : variantId,
+      );
+      _syncFromCart(userId, cart);
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
-  // 🟢 Get all cart items for a user as a map
-  Map<String, Map<String, dynamic>> getCartItemsAsMap(String userId) {
-    if (userId.isEmpty || !_cartQuantities.containsKey(userId)) return {};
-
-    final Map<String, Map<String, dynamic>> items = {};
-
-    _cartQuantities[userId]!.forEach((key, quantity) {
-      final parts = key.split('-');
-      if (parts.length >= 2) {
-        final productId = parts[0];
-        final variantId = parts[1];
-        final cartId = _cartIds[userId]![key] ?? 0;
-
-        items[key] = {
-          'product_id': productId,
-          'variant_id': variantId,
-          'quantity': quantity,
-          'cart_id': cartId,
-        };
-      }
-    });
-
-    return items;
+  Future<bool> changeQuantity({
+    required String userId,
+    required String branchId,
+    required String productId,
+    required String variantId,
+    required int quantity,
+  }) async {
+    final itemId = cartItemId(userId, productId, variantId);
+    if (itemId == null) {
+      final ok = await addItem(
+          userId: userId, branchId: branchId, productId: productId, variantId: variantId);
+      if (!ok || quantity <= 1) return ok;
+      return changeQuantity(
+          userId: userId,
+          branchId: branchId,
+          productId: productId,
+          variantId: variantId,
+          quantity: quantity);
+    }
+    try {
+      final cart = quantity <= 0
+          ? await Repos.cart.remove(itemId)
+          : await Repos.cart.setQuantity(itemId, quantity);
+      _syncFromCart(userId, cart);
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
-  // 🟢 Helper method to generate consistent cart key
-  String _getCartKey(String productId, String variantId) {
-    return '$productId-$variantId';
-  }
-
-  // 🟢 Get all product IDs in cart for a user
-  List<String> getProductIdsInCart(String userId) {
-    if (userId.isEmpty || !_cartQuantities.containsKey(userId)) return [];
-
-    final productIds = <String>{};
-
-    _cartQuantities[userId]!.forEach((key, _) {
-      final parts = key.split('-');
-      if (parts.isNotEmpty) {
-        productIds.add(parts[0]);
-      }
-    });
-
-    return productIds.toList();
-  }
-
-  // 🟢 Check if cart is empty for a user
-  bool isCartEmpty(String userId) {
-    if (userId.isEmpty || !_cartQuantities.containsKey(userId)) return true;
-    return _cartQuantities[userId]!.isEmpty;
-  }
-
-  // 🟢 Get total number of unique items in cart
-  int getUniqueItemsCount(String userId) {
-    if (userId.isEmpty || !_cartQuantities.containsKey(userId)) return 0;
-    return _cartQuantities[userId]!.length;
-  }
-
-  void clearCartData(String userId) {
-    // Remove all entries for this user
-    _cartQuantities.removeWhere((key, value) => key.startsWith('$userId-'));
-    _cartIds.removeWhere((key, value) => key.startsWith('$userId-'));
-    notifyListeners();
+  Future<bool> removeItem({
+    required String userId,
+    required String branchId,
+    required String productId,
+    required String variantId,
+  }) async {
+    final itemId = cartItemId(userId, productId, variantId);
+    if (itemId == null) return true;
+    try {
+      final cart = await Repos.cart.remove(itemId);
+      _syncFromCart(userId, cart);
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 }

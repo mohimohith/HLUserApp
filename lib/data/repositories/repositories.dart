@@ -3,6 +3,7 @@ import 'auth_repository.dart';
 import 'branch_repository.dart';
 import 'cart_repository.dart';
 import 'coupon_repository.dart';
+import 'gift_repository.dart';
 import 'home_repository.dart';
 import 'order_repository.dart';
 import 'product_repository.dart';
@@ -13,6 +14,7 @@ export 'auth_repository.dart';
 export 'branch_repository.dart';
 export 'cart_repository.dart';
 export 'coupon_repository.dart';
+export 'gift_repository.dart';
 export 'home_repository.dart';
 export 'order_repository.dart';
 export 'product_repository.dart';
@@ -32,5 +34,6 @@ class Repos {
   static final AddressRepository addresses = AddressRepository();
   static final OrderRepository orders = OrderRepository();
   static final CouponRepository coupons = CouponRepository();
+  static final GiftRepository gifts = GiftRepository();
   static final WishlistRepository wishlist = WishlistRepository();
 }

@@ -1,11 +1,11 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
-import 'package:google_fonts/google_fonts.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../Auth/loginScreen.dart';
-import '../LocationScreen/locationScreen.dart';
+import '../BottomNav/bottomNavScreen.dart';
+import '../compat/app_state.dart';
+import '../core/session/session_manager.dart';
+import '../data/repositories/repositories.dart';
 import '../utils/colors.dart';
 
 class SplashScreen extends StatefulWidget {
@@ -17,76 +17,60 @@ class SplashScreen extends StatefulWidget {
 
 class _SplashScreenState extends State<SplashScreen>
     with SingleTickerProviderStateMixin {
-
-
-
   @override
   void initState() {
     super.initState();
 
-    // Status Bar & Navigation Bar Settings
-    SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle(
+    SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
       statusBarColor: AppColors.primaryColor,
       statusBarIconBrightness: Brightness.dark,
       systemNavigationBarColor: AppColors.primaryColor,
       systemNavigationBarIconBrightness: Brightness.dark,
     ));
 
-
-
-
-
-    Timer(Duration(seconds: 3), () {
-      checkLogin();
-    });
-  }
-
-  @override
-  void dispose() {
-
-    super.dispose();
+    Timer(const Duration(seconds: 3), checkLogin);
   }
 
   Future<void> checkLogin() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    String? userID = prefs.getString('user_id');
-
-    if (!mounted) return;
-
-    if (userID != null) {
-
-      Navigator.pushReplacement(context, MaterialPageRoute(builder: (context)=>LocationScreen()));
-
-
-    } else {
-      // ❌ Not logged in
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => LoginScreen()),
-      );
+    final authed = SessionManager.instance.isAuthenticated.value;
+    if (!authed) {
+      _go(const LoginScreen());
+      return;
     }
+
+    // Resolve the branch to serve + warm the home cache so the first frame of
+    // the shell has delivery-time / brand data ready.
+    try {
+      final branch = await Repos.branches.resolveActiveBranch();
+      AppState.setBranch(branch?.id);
+    } catch (_) {
+      AppState.setBranch(SessionManager.instance.branchId);
+    }
+    _go(const BottomNavScreen());
   }
 
+  void _go(Widget screen) {
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => screen),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Container(
-        decoration: BoxDecoration(
-          color: AppColors.backgroundColor
-        ),
+        decoration: const BoxDecoration(color: AppColors.backgroundColor),
         child: Center(
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-
               Image.asset(
                 "assets/images/logo.png",
                 width: 250,
                 height: 250,
-              )
-
-
+              ),
             ],
           ),
         ),
@@ -94,4 +78,3 @@ class _SplashScreenState extends State<SplashScreen>
     );
   }
 }
-

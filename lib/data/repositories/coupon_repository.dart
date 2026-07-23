@@ -17,4 +17,21 @@ class CouponRepository {
     );
     return CouponValidation.fromJson(res.data);
   }
+
+  /// Public list of active, non-expired coupons for the branch (raw backend
+  /// maps; adapt via [LegacyAdapters.coupon] for the legacy coupon cards).
+  Future<List<Map<String, dynamic>>> available(String branchId) async {
+    try {
+      final res = await _api.get<List<dynamic>>(
+        '/coupons/available',
+        query: {'branchId': branchId},
+      );
+      return res.data
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+    } catch (_) {
+      return const [];
+    }
+  }
 }

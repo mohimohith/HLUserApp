@@ -1,14 +1,13 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
 import '../../OrderSummary/order_summary.dart';
 import '../../TrackOrder/track_order.dart';
-import '../../utils/api_constants.dart';
+import '../../compat/app_state.dart';
+import '../../compat/legacy_adapters.dart';
+import '../../data/repositories/repositories.dart';
 import '../../utils/colors.dart';
 import '../bottomNavScreen.dart';
 import '../../Provider/language_provider.dart';
@@ -27,7 +26,7 @@ class _OrderScreenState extends State<OrderScreen> with TickerProviderStateMixin
   String userName = "";
   String userEmail = "";
   String userId = "";
-  int branchId = 0;
+  String branchId = '';
   String branchName = "";
 
   @override
@@ -52,21 +51,11 @@ class _OrderScreenState extends State<OrderScreen> with TickerProviderStateMixin
   }
 
   Future<void> fetchLocation() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    String? uArea = prefs.getString('user_area_h');
-    String? uCity = prefs.getString('user_city_h');
-    int bId = prefs.getInt('selected_branch_id') ?? 0;
-    String? bName = prefs.getString('selected_branch_name');
-
-    if ((uArea != null && uArea.trim().isNotEmpty) ||
-        (uCity != null && uCity.trim().isNotEmpty)) {
-      setState(() {
-        branchId = bId;
-        branchName = bName ?? "";
-      });
-
-      await fetchUserData();
-    }
+    setState(() {
+      branchId = AppState.branchIdOrEmpty;
+      branchName = AppState.branchName ?? "";
+    });
+    await fetchUserData();
   }
 
   // Helper method to get text based on language
@@ -76,34 +65,22 @@ class _OrderScreenState extends State<OrderScreen> with TickerProviderStateMixin
   }
 
   Future<void> fetchUserData() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    String? user_ID = prefs.getString('user_id');
-    if (user_ID != null) {
-      setState(() => userId = user_ID);
+    final uid = AppState.userId;
+    if (uid.isNotEmpty) {
+      setState(() => userId = uid);
       await fetchOrders(userId);
+    } else {
+      setState(() => isLoading = false);
     }
   }
 
   Future<void> fetchOrders(String userId) async {
     try {
-      final response = await http.post(
-        Uri.parse(ApiConstants.GET_ORDER_BY_USER),
-        body: {
-          "user_id": userId,
-          "branch_id": branchId.toString(),
-        },
-      );
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-
-        setState(() {
-          orders = (data["orders"] ?? []) as List;
-          isLoading = false;
-        });
-      } else {
-        throw Exception("Failed to load orders");
-      }
+      final page = await Repos.orders.myOrders(page: 1, limit: 50);
+      setState(() {
+        orders = LegacyAdapters.orders(page.items);
+        isLoading = false;
+      });
     } catch (e) {
       debugPrint("Error: $e");
       setState(() => isLoading = false);
@@ -340,7 +317,12 @@ class _OrderScreenState extends State<OrderScreen> with TickerProviderStateMixin
                       MaterialPageRoute(
                         builder: (context) => TrackOrder(
                           status: status,
-                          orderId: orderId,
+                          // Pass the backend cuid (order_id), not the display
+                          // order number, so TrackOrder can fetch the live order.
+                          orderId: (orderData['order_id']?.toString() ?? '')
+                                  .isNotEmpty
+                              ? orderData['order_id'].toString()
+                              : orderId,
                           userId: userId, // ✅ Add userId
                           branchId: branchId, // ✅ Add branchId
                           refreshCallback: refreshOrders, // Pass refresh function

@@ -1,24 +1,23 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../BottomNav/Screens/cartScreen.dart';
 import '../Provider/cart_provider.dart';
 import '../Provider/language_provider.dart';
 import '../CustomWidgets/product_card.dart';
-import '../utils/api_constants.dart';
+import '../compat/app_state.dart';
+import '../compat/legacy_adapters.dart';
+import '../data/repositories/repositories.dart';
 import '../utils/colors.dart';
 
 class CategoryViewScreen extends StatefulWidget {
-  final int? categoryId;
-  final int? subCategoryId;
+  final String? categoryId;
+  final String? subCategoryId;
   final String? categoryName;
   final String? categoryImage;
-  final int branchId;
+  final String branchId;
 
   const CategoryViewScreen({
     Key? key,
@@ -26,7 +25,7 @@ class CategoryViewScreen extends StatefulWidget {
     this.subCategoryId,
     this.categoryName,
     this.categoryImage,
-    required this.branchId,
+    this.branchId = '',
   }) : super(key: key);
 
   @override
@@ -34,8 +33,8 @@ class CategoryViewScreen extends StatefulWidget {
 }
 
 class _CategoryViewScreenState extends State<CategoryViewScreen> {
-  late int selectedCategoryId;
-  late int selectedSubCategoryId;
+  late String selectedCategoryId;
+  late String selectedSubCategoryId;
   late String selectedCategoryName;
   late String selectedSubCategoryName;
 
@@ -44,27 +43,22 @@ class _CategoryViewScreenState extends State<CategoryViewScreen> {
   bool _isLoadingProducts = false;
   List<String> menuList = ['Brands', 'Sort'];
   List<String> shortList = ['Relevance (default)', 'Price (low to high)', 'Price (high to low)', 'Discount (high to low)'];
-  List<Map<String, dynamic>> cartList = [];
 
   String? selectedBrand;
   String? selectedSortOption;
   List<String> brands = [];
   TextEditingController brandSearchController = TextEditingController();
 
-  String userEmail = "";
-  String userName = "";
-  String userID = "";
-
-  int branchId = 0;
-  String branchName  = "";
+  String get userID => AppState.userId;
+  String get branchId =>
+      widget.branchId.isNotEmpty ? widget.branchId : AppState.branchIdOrEmpty;
 
   @override
   void initState() {
     super.initState();
-    fetchUserData();
-    selectedCategoryId = widget.categoryId ?? 0;
+    selectedCategoryId = widget.categoryId ?? '';
     selectedCategoryName = widget.categoryName ?? "";
-    selectedSubCategoryId = widget.subCategoryId ?? 0;
+    selectedSubCategoryId = widget.subCategoryId ?? '';
     selectedSubCategoryName = "All";
     brandSearchController = TextEditingController();
     _initializeCategoryData();
@@ -85,7 +79,7 @@ class _CategoryViewScreenState extends State<CategoryViewScreen> {
   // Helper method to get subcategory name based on language
   String getSubCategoryName(Map<String, dynamic> subcategory) {
     final languageProvider =
-    Provider.of<LanguageProvider>(context, listen: false); // ✅ FIX
+    Provider.of<LanguageProvider>(context, listen: false);
 
     final String englishName = subcategory['sub_category_name'] ?? '';
     final String teluguName = subcategory['name_telugu'] ?? '';
@@ -97,43 +91,9 @@ class _CategoryViewScreenState extends State<CategoryViewScreen> {
     }
   }
 
-  Future<void> fetchUserData() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    String? user_ID = prefs.getString('user_id');
-    if (user_ID != null) {
-      setState(() => userID = user_ID);
-      await fetchCartQuantity(user_ID);
-    }
-  }
-
-  Future<void> fetchCartQuantity(String id) async {
-    final url = Uri.parse(
-      '${ApiConstants.GET_CART_ITEMS}?user_id=$id',
-    );
-    try {
-      final response = await http.get(url);
-      final data = json.decode(response.body);
-
-      if (data['success']) {
-        final cartItems = List<Map<String, dynamic>>.from(data['cart'] ?? []);
-        setState(() {
-          cartList = cartItems;
-        });
-      } else {
-        setState(() {
-          cartList = [];
-        });
-      }
-    } catch (e) {
-      setState(() {
-        cartList = [];
-      });
-    }
-  }
-
   Future<void> _initializeCategoryData() async {
     await fetchSubcategories();
-    if (selectedSubCategoryId == 0) {
+    if (selectedSubCategoryId.isEmpty) {
       await fetchAllProductsFromCategory();
     } else {
       await fetchProducts(selectedSubCategoryId);
@@ -141,75 +101,49 @@ class _CategoryViewScreenState extends State<CategoryViewScreen> {
   }
 
   Future<void> fetchSubcategories() async {
-    final url = Uri.parse(ApiConstants.VIEW_SUB_CATEGORY);
     try {
-      final res = await http.post(
-        url,
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        },
-        body: {
-          'category_id': selectedCategoryId.toString(),
-        },
-      );
+      // Subcategories come from the aggregated /home payload: find the matching
+      // category and adapt its subCategories to the old map shape.
+      final home = await Repos.home.getHome(branchId);
+      final match = home.categories
+          .where((c) => c.id == selectedCategoryId)
+          .toList();
 
-      if (res.statusCode == 200) {
-        // First try to decode with UTF-8
-        String responseBody = utf8.decode(res.bodyBytes);
-        final data = jsonDecode(responseBody);
+      final List<Map<String, dynamic>> subs = match.isNotEmpty
+          ? match.first.subCategories.map(LegacyAdapters.subCategory).toList()
+          : <Map<String, dynamic>>[];
 
-        if (!mounted) return;
-
-        if (data['success'] == true && data['subcategories'] is List) {
-          setState(() {
-            subcategories = [
-              {
-                'id': 0,
-                'sub_category_name': 'All',
-                'name_telugu': 'అన్ని',
-                'sub_category_image': widget.categoryImage,
-              },
-              ...data['subcategories'],
-            ];
-          });
-
-          // Debug: Print telugu names to check encoding
-          for (var subcat in data['subcategories']) {
-            if (subcat['name_telugu'] != null) {
-              print("Telugu name from API: ${subcat['name_telugu']}");
-            }
-          }
-        } else {
-          setState(() {
-            subcategories = [
-              {
-                'id': 0,
-                'sub_category_name': 'All',
-                'name_telugu': 'అన్ని',
-                'sub_category_image': widget.categoryImage,
-              },
-            ];
-          });
-        }
-      }
-    } catch (e) {
-      print("Error fetching subcategories: $e");
       if (!mounted) return;
       setState(() {
         subcategories = [
           {
-            'id': 0,
+            'id': '',
             'sub_category_name': 'All',
             'name_telugu': 'అన్ని',
             'sub_category_image': widget.categoryImage,
+            'image': widget.categoryImage,
+          },
+          ...subs,
+        ];
+      });
+    } catch (e) {
+      debugPrint("Error fetching subcategories: $e");
+      if (!mounted) return;
+      setState(() {
+        subcategories = [
+          {
+            'id': '',
+            'sub_category_name': 'All',
+            'name_telugu': 'అన్ని',
+            'sub_category_image': widget.categoryImage,
+            'image': widget.categoryImage,
           },
         ];
       });
     }
   }
 
-
-  Future<void> fetchProducts(int subId) async {
+  Future<void> fetchProducts(String subId) async {
     setState(() {
       _isLoadingProducts = true;
       products = [];
@@ -217,38 +151,32 @@ class _CategoryViewScreenState extends State<CategoryViewScreen> {
       selectedSortOption = null;
     });
 
-    final url = Uri.parse(
-      '${ApiConstants.VIEW_PRODUCTS_BY_SUBCATEGORY}?subcategory_id=$subId&branch_id=${widget.branchId}',
-    );
     try {
-      final res = await http.get(url);
-
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body);
-        if (data['success'] == true) {
-          setState(() {
-            products = data['products'];
-            _processProductVariants();
-            _extractBrands();
-          });
-        } else {
-          setState(() {
-            products = [];
-          });
-        }
-      } else {
-        setState(() {
-          products = [];
-        });
-      }
+      final page = await Repos.products.list(
+        branchId: branchId,
+        categoryId: selectedCategoryId.isNotEmpty ? selectedCategoryId : null,
+        subCategoryId: subId.isNotEmpty ? subId : null,
+        page: 1,
+        limit: 100,
+      );
+      if (!mounted) return;
+      setState(() {
+        products = page.items.map(LegacyAdapters.product).toList();
+        _processProductVariants();
+        _extractBrands();
+      });
     } catch (e) {
+      debugPrint('Error fetching products: $e');
+      if (!mounted) return;
       setState(() {
         products = [];
       });
     } finally {
-      setState(() {
-        _isLoadingProducts = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isLoadingProducts = false;
+        });
+      }
     }
   }
 
@@ -260,38 +188,31 @@ class _CategoryViewScreenState extends State<CategoryViewScreen> {
       selectedSortOption = null;
     });
 
-    final url = Uri.parse(
-      '${ApiConstants.VIEW_ALL_PRODUCTS_BY_CATEGORY}?category_id=$selectedCategoryId&branch_id=${widget.branchId}',
-    );
     try {
-      final res = await http.get(url);
-
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body);
-        setState(() {
-          if (data is List) {
-            products = data;
-          } else if (data['products'] != null) {
-            products = data['products'];
-          } else {
-            products = [];
-          }
-          _processProductVariants();
-          _extractBrands();
-        });
-      } else {
-        setState(() {
-          products = [];
-        });
-      }
+      final page = await Repos.products.list(
+        branchId: branchId,
+        categoryId: selectedCategoryId.isNotEmpty ? selectedCategoryId : null,
+        page: 1,
+        limit: 100,
+      );
+      if (!mounted) return;
+      setState(() {
+        products = page.items.map(LegacyAdapters.product).toList();
+        _processProductVariants();
+        _extractBrands();
+      });
     } catch (e) {
+      debugPrint('Error fetching products: $e');
+      if (!mounted) return;
       setState(() {
         products = [];
       });
     } finally {
-      setState(() {
-        _isLoadingProducts = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isLoadingProducts = false;
+        });
+      }
     }
   }
 
@@ -310,13 +231,21 @@ class _CategoryViewScreenState extends State<CategoryViewScreen> {
   void _processProductVariants() {
     for (var product in products) {
       if (product['variants'] != null && product['variants'].isNotEmpty) {
-        product['selectedVariantName'] = product['variants'][0]['name'];
+        final firstVariant = product['variants'][0];
+        product['selectedVariantName'] = firstVariant['name'];
         product['selectedPrice'] = double.tryParse(
-          product['variants'][0]['selling_price'].toString(),
+          firstVariant['selling_price'].toString(),
         );
+        // Compute discount % from the first variant for the "Discount" sort,
+        // since the new product map has no flat `discount` field.
+        final mrp = double.tryParse(firstVariant['price'].toString()) ?? 0;
+        final sp = double.tryParse(firstVariant['selling_price'].toString()) ?? 0;
+        product['discount'] =
+            mrp > 0 ? ((mrp - sp) / mrp * 100).round() : 0;
       } else {
         product['selectedVariantName'] = null;
         product['selectedPrice'] = null;
+        product['discount'] = 0;
       }
     }
   }
@@ -364,7 +293,7 @@ class _CategoryViewScreenState extends State<CategoryViewScreen> {
   Widget _buildCategoryImage(String? imageUrl, double size) {
     if (imageUrl != null && imageUrl.isNotEmpty) {
       return Image.network(
-        ApiConstants.BASE_URL + '/category_api/$imageUrl',
+        imageUrl,
         width: size,
         height: size,
         fit: BoxFit.contain,
@@ -391,19 +320,15 @@ class _CategoryViewScreenState extends State<CategoryViewScreen> {
   @override
   Widget build(BuildContext context) {
     final cartProvider = Provider.of<CartProvider>(context);
-    final languageProvider = Provider.of<LanguageProvider>(context);
 
     final screenWidth = MediaQuery.of(context).size.width;
-    final screenHeight = MediaQuery.of(context).size.height;
     final isTablet = screenWidth > 600;
     final isLargeScreen = screenWidth > 900;
 
     final sidebarWidth = isLargeScreen ? screenWidth * 0.12 : (isTablet ? screenWidth * 0.15 : screenWidth * 0.22);
-    final headerHeight = isTablet ? 70.0 : 60.0;
     final backButtonSize = isTablet ? 32.0 : 28.0;
     final backButtonIconSize = isTablet ? 18.0 : 15.0;
     final titleFontSize = isTablet ? 20.0 : 17.0;
-    final filterButtonHeight = isLargeScreen ? 60.0 : (isTablet ? 55.0 : 50.0);
 
     final gridCrossAxisCount = isLargeScreen ? 3 : (isTablet ? 3 : 2);
     final gridAspectRatio = isLargeScreen ? 0.65 : (isTablet ? 0.58 : 0.50);
@@ -495,9 +420,7 @@ class _CategoryViewScreenState extends State<CategoryViewScreen> {
                               itemCount: subcategories.length,
                               itemBuilder: (context, index) {
                                 final subcat = subcategories[index];
-                                final int newSubCatId = (subcat['id'] is int)
-                                    ? subcat['id']
-                                    : int.tryParse(subcat['id'].toString()) ?? 0;
+                                final String newSubCatId = subcat['id']?.toString() ?? '';
                                 final bool isSelected = newSubCatId == selectedSubCategoryId;
 
                                 final imageSize = isLargeScreen ? 60.0 : (isTablet ? 55.0 : 50.0);
@@ -515,7 +438,7 @@ class _CategoryViewScreenState extends State<CategoryViewScreen> {
                                         selectedSortOption = null;
                                       });
 
-                                      if (newSubCatId == 0) {
+                                      if (newSubCatId.isEmpty) {
                                         fetchAllProductsFromCategory();
                                       } else {
                                         fetchProducts(newSubCatId);
@@ -536,10 +459,10 @@ class _CategoryViewScreenState extends State<CategoryViewScreen> {
                                               child: Center(
                                                 child: ClipRRect(
                                                   borderRadius: BorderRadius.circular(isTablet ? 10 : 8),
-                                                  child: newSubCatId == 0
+                                                  child: newSubCatId.isEmpty
                                                       ? _buildCategoryImage(subcat['sub_category_image'], imageSize)
                                                       : Image.network(
-                                                    ApiConstants.BASE_URL + '/sub_category_api/${subcat['sub_category_image']}',
+                                                    (subcat['sub_category_image'] ?? subcat['image'] ?? '').toString(),
                                                     width: imageSize,
                                                     height: imageSize,
                                                     fit: BoxFit.contain,
@@ -692,14 +615,12 @@ class _CategoryViewScreenState extends State<CategoryViewScreen> {
                                     return ProductCard(
                                       product: product,
                                       userId: userID,
-                                      branchId: widget.branchId,
+                                      branchId: branchId,
                                       onCartUpdated: () {
-                                        fetchCartQuantity(userID);
+                                        if (mounted) setState(() {});
                                       },
                                       onCategoryBack: (){
-                                        setState(() {
-                                          fetchCartQuantity(userID);
-                                        });
+                                        if (mounted) setState(() {});
                                       },
                                     );
                                   },
@@ -730,9 +651,7 @@ class _CategoryViewScreenState extends State<CategoryViewScreen> {
                           context,
                           MaterialPageRoute(builder: (context) => CartScreen()),
                         );
-                        setState(() {
-                          fetchCartQuantity(userID);
-                        });
+                        if (mounted) setState(() {});
                       },
                       child: Container(
                         height: 38.h,
@@ -880,7 +799,6 @@ class _CategoryViewScreenState extends State<CategoryViewScreen> {
                                 children: [
                                   ...menuList.asMap().entries.map((entry) {
                                     int index = entry.key;
-                                    String item = entry.value;
                                     bool isSelected = selectedTab == index;
                                     return GestureDetector(
                                       onTap: () {

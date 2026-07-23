@@ -18,7 +18,7 @@ class AppConfig {
   /// For a physical device on the same LAN, replace with your machine IP.
   static const String _devHost = String.fromEnvironment(
     'API_HOST',
-    defaultValue: 'http://10.0.2.2:3000',
+    defaultValue: 'http://192.168.1.155:3000',
   );
 
   static const String _prodHost = String.fromEnvironment(

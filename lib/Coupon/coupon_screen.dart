@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'package:dotted_line/dotted_line.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -6,10 +5,10 @@ import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:flutter_svg/svg.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 
-import '../utils/api_constants.dart';
+import '../compat/app_state.dart';
+import '../compat/legacy_adapters.dart';
+import '../data/repositories/repositories.dart';
 import '../utils/colors.dart';
 
 
@@ -23,48 +22,32 @@ class CouponScreen extends StatefulWidget {
 class _CouponScreenState extends State<CouponScreen> {
   List<Map<String, dynamic>> _couponList = [];
 
-  int branchId = 0;
+  String branchId = '';
   String branchName  = "";
 
 
 
   @override
   void initState() {
-    // TODO: implement initState
     super.initState();
     fetchLocation();
   }
 
   Future<void> fetchLocation() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    String? uArea = prefs.getString('user_area_h');
-    String? uCity = prefs.getString('user_city_h');
-    int bId = prefs.getInt('selected_branch_id') ?? 0;
-    String? bName  = prefs.getString('selected_branch_name');
-
-    // agar dono me se koi ek bhi null na ho
-    if ((uArea != null && uArea.trim().isNotEmpty) ||
-        (uCity != null && uCity.trim().isNotEmpty)) {
-      setState(() {
-        branchId = bId;
-        branchName = bName ?? "";
-      });
-
-      await  _fetchCoupons();
-    }
+    setState(() {
+      branchId = AppState.branchIdOrEmpty;
+      branchName = AppState.branchName ?? "";
+    });
+    await _fetchCoupons();
   }
 
 
 
   Future<void> _fetchCoupons() async {
     try {
-      final response = await http.get(Uri.parse('${ApiConstants.VIEW_COUPON}?branch_id=$branchId'));
-      if (response.statusCode == 200) {
-        final decoded = jsonDecode(response.body);
-        if (decoded['success'] == true && decoded['data'] is List) {
-          setState(() => _couponList = List<Map<String, dynamic>>.from(decoded['data']));
-        }
-      }
+      final coupons = await Repos.coupons.available(branchId);
+      setState(() => _couponList =
+          coupons.map((c) => LegacyAdapters.coupon(c)).toList());
     } catch (e) {
       debugPrint("Error fetching coupons: $e");
     }

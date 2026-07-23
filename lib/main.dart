@@ -9,8 +9,7 @@ import 'package:in_app_update/in_app_update.dart';
 import 'package:flutter/foundation.dart';
 import 'Provider/language_provider.dart';
 import 'core/session/session_manager.dart';
-import 'features/cart/cart_controller.dart';
-import 'features/shell/app_gate.dart';
+import 'SplashScreen/splashScreen.dart';
 
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
@@ -111,10 +110,7 @@ class _MyAppState extends State<MyApp> {
         return MultiProvider(
           providers: [
             ChangeNotifierProvider(create: (_) => CartProvider()),
-            // Modern server-authoritative cart used by the migrated screens.
-            ChangeNotifierProvider(create: (_) => CartController()),
             ChangeNotifierProvider(create: (_) => LanguageProvider()),
-
           ],
           child: MaterialApp(
             scaffoldMessengerKey: scaffoldMessengerKey,
@@ -124,8 +120,8 @@ class _MyAppState extends State<MyApp> {
               colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
               useMaterial3: true,
             ),
-            // Migrated entry: new backend session gate → login / app shell.
-            home: const AppGate(),
+            // Legacy UI entry, wired to the new backend.
+            home: const SplashScreen(),
           ),
         );
       },

@@ -1,20 +1,17 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:http/http.dart' as http;
-import 'package:intl/intl.dart';
 import 'package:lottie/lottie.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:razorpay_flutter/razorpay_flutter.dart';
 
 import '../BottomNav/Screens/order_screen.dart';
 import '../Provider/cart_provider.dart';
 import '../DeliveryAddress/delivery_address_screen.dart';
-import '../utils/api_constants.dart';
+import '../compat/app_state.dart';
+import '../data/repositories/repositories.dart';
 import '../utils/colors.dart';
 
 class CheckoutScreen extends StatefulWidget {
@@ -71,8 +68,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   bool hasProfileData = false;
   String deliveryTime = '0';
 
-  // Razorpay instance
-  late Razorpay _razorpay;
+  // Payment is COD-only on the new backend (Razorpay removed during migration).
 
 
 
@@ -85,110 +81,26 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     fetchDeliveryTime();
     _loadSelectedAddress();
     fetchUserDetails(widget.userId);
-
-    // Initialize Razorpay
-    _razorpay = Razorpay();
-    _razorpay.on(Razorpay.EVENT_PAYMENT_SUCCESS, _handlePaymentSuccess);
-    _razorpay.on(Razorpay.EVENT_PAYMENT_ERROR, _handlePaymentError);
-    _razorpay.on(Razorpay.EVENT_EXTERNAL_WALLET, _handleExternalWallet);
   }
-
-  @override
-  void dispose() {
-    _razorpay.clear(); // Removes all listeners
-    super.dispose();
-  }
-
 
   Future<void> fetchDeliveryTime() async {
-    final url = Uri.parse(ApiConstants.DELIVERY_TIME);
-
-    try {
-      final response = await http.get(url);
-      final data = json.decode(response.body);
-
-      if (data['success']) {
-        setState(() {
-          deliveryTime = data['data']['time'];
-        });
-      } else {
-        setState(() {
-          deliveryTime = 'No time found';
-        });
-      }
-    } catch (e) {
-      setState(() {
-        deliveryTime = 'Error fetching time';
-      });
-    }
+    setState(() => deliveryTime = AppState.deliveryTimeText.isNotEmpty
+        ? AppState.deliveryTimeText
+        : '30 Minutes');
   }
-
-
-  void _handlePaymentSuccess(PaymentSuccessResponse response) {
-    // Payment successful - place the order
-    print("Payment successful: ${response.paymentId}");
-
-    capturePayment(response.paymentId!, widget.finalWithCharge.toInt() * 100);
-    // Place order with Razorpay payment method
-    _placeOrderAfterPayment(
-      paymentMethod: 'razorpay',
-      paymentId: response.paymentId!,
-      context: context,
-    );
-  }
-
-  Future<void> capturePayment(String paymentId, int amount) async {
-    final response = await http.post(
-      Uri.parse(ApiConstants.RAZORPAY_AUTO_CAPTURE_AMOUNT),
-      body: {
-        "payment_id": paymentId,
-        "amount": amount.toString(),
-      },
-    );
-
-    print("Capture response: ${response.body}");
-  }
-
-  void _handlePaymentError(PaymentFailureResponse response) {
-    // Payment failed
-    print("Payment failed: ${response.code} - ${response.message}");
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Payment failed: ${response.message}'),
-        backgroundColor: Colors.red,
-      ),
-    );
-
-    setState(() {
-      _isPlacingOrder = false;
-    });
-  }
-
-  void _handleExternalWallet(ExternalWalletResponse response) {
-    // External wallet was used
-    print("External wallet: ${response.walletName}");
-  }
-
-
 
   Future<void> fetchUserDetails(String userId) async {
-    final url = Uri.parse("${ApiConstants.BASE_URL}/auth/get_user.php?userId=$userId");
     try {
-      final response = await http.get(url);
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        if (data["status"] == "success") {
-          setState(() {
-            userStatus = data["user"]["status"] ?? "";
-            userEmail = data["user"]["email"] ?? "";
-            userName = data["user"]["name"] ?? "";
-            userPhone = data["user"]["login_id"] ?? ""; // Get phone number
-            hasProfileData = userEmail.isNotEmpty && userName.isNotEmpty;
-          });
-        }
-      }
+      final user = await Repos.auth.me();
+      setState(() {
+        userEmail = (user['email'] ?? '').toString();
+        userName = (user['name'] ?? '').toString();
+        userPhone = (user['phone'] ?? '').toString();
+        userStatus = (user['isActive'] == false) ? 'blocked' : 'active';
+        hasProfileData = userName.isNotEmpty;
+      });
     } catch (e) {
-      print("Error fetching user details: $e");
+      debugPrint("Error fetching user details: $e");
     }
   }
 
@@ -208,96 +120,42 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   }
 
 
+  /// Place the order on the new backend (COD only). The `/orders` endpoint
+  /// resolves the server cart + totals; we only pass branch, address, coupon
+  /// and optional gift.
   void _placeOrderAfterPayment({
     required String paymentMethod,
     required String paymentId,
     required BuildContext context,
   }) async {
-    final url = Uri.parse(ApiConstants.PLACE_ORDER);
-
-    // Prepare cart items data
-    List<Map<String, dynamic>> itemsToOrder = [];
-
-    if (widget.isSingleProductCheckout && widget.cartItems.isNotEmpty) {
-      // If it's a single product checkout, only include that product
-      itemsToOrder = widget.cartItems;
-    } else {
-      // If it's a full cart checkout, get all items from cart provider
-      final cartProvider = Provider.of<CartProvider>(context, listen: false);
-      // You'll need to implement a method to get cart items as list from your provider
-      itemsToOrder = cartProvider.getCartItemsAsList(widget.userId);
-    }
-
-    final body = {
-      "user_id": widget.userId,
-      "coupon_code": widget.coupon_code_name,
-      "discount_amount": widget.saveAmount.toString(),
-      "delivery_charge": widget.deliveyCharge.toString(),
-      "handling_charge": widget.handlingCharge.toString(),
-      "payment_method": paymentMethod,
-      "payment_id": paymentId,
-      "dateTimeNow": DateFormat('dd-MM-yyyy hh:mm a').format(DateTime.now()),
-      "deliveryDate": DateFormat('dd-MM-yyyy hh:mm a').format(DateTime.now()),
-      "deliverTime": DateFormat('dd-MM-yyyy hh:mm a').format(DateTime.now()),
-      "location_id": location_id,
-      "famount": widget.finalWithCharge.toString(),
-      "gift": widget.giftName.toString(),
-      "branch_id" : widget.branch_id.toString(),
-      "user_email" : userEmail.isNotEmpty ? userEmail : widget.userEmail,
-      "user_name": userName.isNotEmpty ? userName : widget.userName,
-      // Add cart items to the request
-      "cart_items": jsonEncode(itemsToOrder),
-    };
-
     try {
-      final response = await http.post(
-        url,
-        headers: {"Content-Type": "application/json"},
-        body: jsonEncode(body),
+      final branchId = AppState.branchIdOrEmpty;
+      await Repos.orders.place(
+        branchId: branchId,
+        addressId: location_id,
+        paymentMethod: 'COD',
+        couponCode:
+            widget.coupon_code_name.isEmpty ? null : widget.coupon_code_name,
+        giftName: widget.giftName.isEmpty ? null : widget.giftName,
       );
 
-      final data = jsonDecode(response.body);
+      setState(() => _isPlacingOrder = false);
 
-      setState(() {
-        _isPlacingOrder = false;
-      });
-
-      if (data['success'] == true) {
-        print("✅ Order placed successfully!");
-
-        // 🟢 IMPORTANT: Clear the cart after successful order placement
-        final cartProvider = Provider.of<CartProvider>(context, listen: false);
-
-        if (widget.isSingleProductCheckout && widget.cartItems.isNotEmpty) {
-          // Remove only the specific product that was ordered
-          for (var item in widget.cartItems) {
-            cartProvider.removeCartItem(
-                widget.userId,
-                item['product_id'].toString(),
-                item['variant_id'].toString()
-            );
-          }
-        } else {
-          // Clear entire cart for full checkout
-          cartProvider.clearCart(widget.userId);
+      final cartProvider = Provider.of<CartProvider>(context, listen: false);
+      if (widget.isSingleProductCheckout && widget.cartItems.isNotEmpty) {
+        for (var item in widget.cartItems) {
+          cartProvider.removeCartItem(widget.userId,
+              item['product_id'].toString(), item['variant_id'].toString());
         }
-
-        _showSuccessDialog(context);
       } else {
-        print("❌ Failed: ${data['message']}");
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Order failed: ${data['message']}'),
-            backgroundColor: Colors.red,
-          ),
-        );
+        cartProvider.clearCart(widget.userId);
       }
-    } catch (e) {
-      setState(() {
-        _isPlacingOrder = false;
-      });
 
-      print("⚠️ Error placing order: $e");
+      if (!mounted) return;
+      _showSuccessDialog(context);
+    } catch (e) {
+      setState(() => _isPlacingOrder = false);
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Error placing order: $e'),
@@ -432,27 +290,12 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       _isPlacingOrder = true;
     });
 
-    if (selectedPaymentMethod == 'cod') {
-      _placeOrderAfterPayment(
-        paymentMethod: 'COD',
-        paymentId: '',
-        context: context,
-      );
-    } else if (selectedPaymentMethod == 'razorpay') {
-      _openRazorpayCheckout();
-    } else if (selectedPaymentMethod == 'upi') {
-      // Handle UPI payment (you can integrate specific UPI apps here)
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Please use Razorpay for UPI payments'),
-          backgroundColor: Colors.orange,
-        ),
-      );
-      setState(() {
-        _isPlacingOrder = false;
-      });
-    }
-
+    // COD-only on the new backend.
+    _placeOrderAfterPayment(
+      paymentMethod: 'COD',
+      paymentId: '',
+      context: context,
+    );
   }
 
   void _showCompleteProfileBottomSheet() {
@@ -469,73 +312,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     );
   }
 
-
-
-  void _openRazorpayCheckout() {
-
-    String phone = (userPhone ?? '').trim();
-
-    debugPrint('Original userPhone: <$phone>');
-
-    String digitsOnly = phone.replaceAll(RegExp(r'\D'), '');
-    debugPrint('Digits only: <$digitsOnly>');
-
-    if (digitsOnly.length == 10) {
-      digitsOnly = '91$digitsOnly'; // result: 918102337432
-      debugPrint('Normalized to (no +): <$digitsOnly>');
-    } else if (digitsOnly.length == 12 && digitsOnly.startsWith('91')) {
-      // already has country code
-      debugPrint('Already has country code (no +): <$digitsOnly>');
-    } else if (digitsOnly.length >= 11 && digitsOnly.startsWith('0')) {
-
-      digitsOnly = digitsOnly.replaceFirst(RegExp(r'^0+'), '');
-      if (digitsOnly.length == 10) digitsOnly = '+91$digitsOnly';
-      debugPrint('After stripping leading zero: <$digitsOnly>');
-    } else {
-      debugPrint('Unusual phone format, using as-is digitsOnly');
-    }
-
-    String plusVariant = '+$digitsOnly';
-
-    var optionsPrefillNoPlus = {
-
-      'key': 'rzp_live_RFbJpnCQq3wZm8',
-      'amount': (widget.finalWithCharge * 100).toInt(),
-      'name': 'Flikka',
-      'description': 'Order Payment',
-      'prefill': {
-        'contact': digitsOnly, // try without +
-        'email': userEmail.isNotEmpty ? userEmail : widget.userEmail,
-      },
-      'external': {'wallets': ['upi']}
-    };
-
-    // Log options (important)
-    debugPrint('Razorpay options (no plus): $optionsPrefillNoPlus');
-
-    try {
-      _razorpay.open(optionsPrefillNoPlus);
-    } catch (e) {
-      debugPrint('Open failed with no-plus: $e');
-
-      // fallback: try with +91 format
-      var optionsPrefillPlus = Map<String, dynamic>.from(optionsPrefillNoPlus);
-      optionsPrefillPlus['prefill'] = {
-        'contact': plusVariant,
-        'email': userEmail.isNotEmpty ? userEmail : widget.userEmail,
-      };
-      debugPrint('Trying fallback options (with +): $optionsPrefillPlus');
-
-      try {
-        _razorpay.open(optionsPrefillPlus);
-      } catch (e2) {
-        debugPrint('Fallback open failed too: $e2');
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Payment init failed: $e2'), backgroundColor: Colors.red),
-        );
-      }
-    }
-  }
 
 
   @override
@@ -1027,28 +803,11 @@ class _CompleteProfileFormState extends State<CompleteProfileForm> {
   bool _isSubmitting = false;
 
   Future<bool> insertUser(String name, String email) async {
-    final url = Uri.parse(ApiConstants.ADD_USER);
-
     try {
-      final response = await http.post(
-        url,
-        body: {
-          "login_id": widget.userId,
-          "name": name,
-          "email": email,
-          "date_time": DateTime.now().toString(),
-        },
-      );
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data["success"] == "true";
-      } else {
-        print("Server error: ${response.statusCode}");
-        return false;
-      }
+      await Repos.auth.updateProfile(name: name, email: email);
+      return true;
     } catch (e) {
-      print("Error: $e");
+      debugPrint("Error updating profile: $e");
       return false;
     }
   }

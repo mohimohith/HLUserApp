@@ -1,16 +1,13 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
-import '../utils/api_constants.dart';
+import '../compat/app_state.dart';
+import '../data/repositories/repositories.dart';
 import '../utils/colors.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import '../Provider/language_provider.dart'; // Add this import
+import '../Provider/language_provider.dart';
 
 class HelpScreen extends StatefulWidget {
   const HelpScreen({super.key});
@@ -24,119 +21,39 @@ class _HelpScreenState extends State<HelpScreen> {
   String whatsapp_Number = 'Loading...!';
   String support_email = 'Loading...!';
 
-  int branchId = 0;
+  String branchId = '';
   String branchName = "";
 
   @override
   void initState() {
     super.initState();
-
     fetchLocation();
   }
 
-
-
   Future<void> fetchLocation() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    String? uArea = prefs.getString('user_area_h');
-    String? uCity = prefs.getString('user_city_h');
-    int bId = prefs.getInt('selected_branch_id') ?? 0;
-    String? bName = prefs.getString('selected_branch_name');
-
-    if ((uArea != null && uArea.trim().isNotEmpty) ||
-        (uCity != null && uCity.trim().isNotEmpty)) {
+    branchId = AppState.branchIdOrEmpty;
+    branchName = AppState.branchName ?? "";
+    if (branchId.isEmpty) return;
+    try {
+      final home = await Repos.home.getHome(branchId);
+      final s = home.settings;
       setState(() {
-
-        branchId = bId;
-        branchName = bName ?? "";
+        callingNumber = (s.helpCallNumber ?? '').isNotEmpty
+            ? s.helpCallNumber! : 'Not available';
+        whatsapp_Number = (s.helpWhatsapp ?? '').isNotEmpty
+            ? s.helpWhatsapp! : 'Not available';
+        support_email = (s.helpEmail ?? '').isNotEmpty
+            ? s.helpEmail! : 'Not available';
       });
-
-      await fetchCallingNumber();
-      await fetchWhatsappNumber();
-      await fetchEmail();
+    } catch (e) {
+      debugPrint("Error loading help info: $e");
     }
   }
-
-
 
   // Helper method to get text based on language
   String getText(BuildContext context, String english, String telugu) {
     final languageProvider = Provider.of<LanguageProvider>(context, listen: true);
     return languageProvider.selectedLanguage == "Telugu" ? telugu : english;
-  }
-
-  Future<void> fetchCallingNumber() async {
-    try {
-      final response = await http.get(
-        Uri.parse(ApiConstants.GET_CALLING_NUMBER + "?branch_id=$branchId"),
-      );
-
-      final data = json.decode(response.body);
-
-      if (data['success']) {
-        setState(() {
-          callingNumber = data['data']['call_help'].toString();
-        });
-      } else {
-        setState(() {
-          callingNumber = getText(context, 'Not available', 'అందుబాటులో లేదు');
-        });
-      }
-    } catch (e) {
-      setState(() {
-        callingNumber = getText(context, 'Error loading', 'లోడ్ చేయడంలో లోపం');
-      });
-    }
-  }
-
-
-  Future<void> fetchWhatsappNumber() async {
-    try {
-      final response = await http.get(
-        Uri.parse(ApiConstants.GET_WHATSAPP_NUMBER + "?branch_id=$branchId"),
-      );
-
-      final data = json.decode(response.body);
-
-      if (data['success']) {
-        setState(() {
-          whatsapp_Number = data['data']['whatsapp_no'].toString();
-        });
-      } else {
-        setState(() {
-          whatsapp_Number = getText(context, 'Not available', 'అందుబాటులో లేదు');
-        });
-      }
-    } catch (e) {
-      setState(() {
-        whatsapp_Number = getText(context, 'Error loading', 'లోడ్ చేయడంలో లోపం');
-      });
-    }
-  }
-
-
-  Future<void> fetchEmail() async {
-    try {
-      final response = await http.get(
-        Uri.parse(ApiConstants.GET_EMAIL + "?branch_id=$branchId"),
-      );
-
-      final data = json.decode(response.body);
-
-      if (data['success']) {
-        setState(() {
-          support_email = data['data']['email'].toString();
-        });
-      } else {
-        setState(() {
-          support_email = getText(context, 'Not available', 'అందుబాటులో లేదు');
-        });
-      }
-    } catch (e) {
-      setState(() {
-        support_email = getText(context, 'Error loading', 'లోడ్ చేయడంలో లోపం');
-      });
-    }
   }
 
 

@@ -1,24 +1,24 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'dart:convert';
-import 'package:http/http.dart' as http;
-import 'package:provider/provider.dart'; // Provider पैकेज import करें
-import '../Provider/language_provider.dart'; // अपना LanguageProvider import करें
+import 'package:provider/provider.dart';
+import '../Provider/language_provider.dart';
 
-import '../utils/api_constants.dart';
+import '../compat/app_state.dart';
+import '../compat/legacy_adapters.dart';
+import '../data/repositories/repositories.dart';
 import '../utils/colors.dart';
 import 'categoryViewScreen.dart';
 
 class MainCategoryView extends StatefulWidget {
-  final int categoy_id;
+  final String categoy_id;
   final String category_name;
-  final int branchID;
+  final String branchID;
 
   MainCategoryView({
     required this.categoy_id,
     required this.category_name,
-    required this.branchID,
+    this.branchID = '',
   });
 
   @override
@@ -30,6 +30,9 @@ class _MainCategoryViewState extends State<MainCategoryView> {
   bool isLoading = true;
   bool hasError = false;
 
+  String get branchId =>
+      widget.branchID.isNotEmpty ? widget.branchID : AppState.branchIdOrEmpty;
+
   // Helper method to get text based on selected language
   String getText(BuildContext context, String english, String telugu) {
     final languageProvider = Provider.of<LanguageProvider>(context, listen: true);
@@ -38,51 +41,36 @@ class _MainCategoryViewState extends State<MainCategoryView> {
 
   Future<void> fetchCategories(String categoryId) async {
     try {
-      final url = Uri.parse(ApiConstants.VIEW_CATEGORY_WITH_MAIN_CATEGOTY_ID);
-      final response = await http.post(
-        url,
-        body: {
-          'category_id': categoryId,
-          'branch_id': widget.branchID.toString(), // int को string में बदलें
-        },
-      );
+      // Categories under the selected main category come from /home.
+      final home = await Repos.home.getHome(branchId);
+      final match = home.mainCategories
+          .where((m) => m.id == categoryId)
+          .toList();
 
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        if (data['success'] == true) {
-          setState(() {
-            categories = data['categoryes'] ?? []; // Null safety
-            isLoading = false;
-            hasError = false;
-          });
-        } else {
-          setState(() {
-            hasError = true;
-            isLoading = false;
-          });
-        }
-      } else {
-        setState(() {
-          hasError = true;
-          isLoading = false;
-        });
-        // Optional: Log the error response
-        print('API Error Status: ${response.statusCode}');
-        print('API Error Body: ${response.body}');
-      }
+      final List<Map<String, dynamic>> mapped = match.isNotEmpty
+          ? match.first.categories.map(LegacyAdapters.category).toList()
+          : <Map<String, dynamic>>[];
+
+      if (!mounted) return;
+      setState(() {
+        categories = mapped;
+        isLoading = false;
+        hasError = false;
+      });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         hasError = true;
         isLoading = false;
       });
-      print('Fetch Error: $e'); // Debug के लिए print
+      debugPrint('Fetch Error: $e');
     }
   }
 
   @override
   void initState() {
     super.initState();
-    fetchCategories(widget.categoy_id.toString());
+    fetchCategories(widget.categoy_id);
   }
 
   Widget _buildCategoryGrid(List categories) {
@@ -99,15 +87,10 @@ class _MainCategoryViewState extends State<MainCategoryView> {
       ),
       itemBuilder: (context, index) {
         final category = categories[index];
-        // ✅ PHP कोड पहले ही html_entity_decode कर चुका है,
-        // इसलिए हम सीधे category_name इस्तेमाल करेंगे।
-        // LanguageProvider से चुनी गई language के हिसाब से,
-        // backend से आया हुआ category_name ही दिखेगा।
         final name = category['category_name'] ??
             getText(context, 'No Name', 'పేరు లేదు'); // Fallback text
-        final imageUrl = category['category_image'] != null
-            ? "${ApiConstants.BASE_URL}/category_api/${category['category_image']}"
-            : '';
+        // Absolute image URL from the adapter; use it directly.
+        final imageUrl = (category['category_image'] ?? '').toString();
 
         return InkWell(
           onTap: () {
@@ -115,10 +98,10 @@ class _MainCategoryViewState extends State<MainCategoryView> {
               context,
               MaterialPageRoute(
                 builder: (context) => CategoryViewScreen(
-                  categoryId: int.parse(category['category_id'].toString()),
+                  categoryId: category['category_id'].toString(),
                   categoryName: category['category_name'],
-                  categoryImage: category['category_image'],
-                  branchId: widget.branchID,
+                  categoryImage: imageUrl,
+                  branchId: branchId,
                 ),
               ),
             );
@@ -178,7 +161,6 @@ class _MainCategoryViewState extends State<MainCategoryView> {
         children: [
           Icon(Icons.error_outline, size: 50.sp, color: Colors.red),
           SizedBox(height: 16.h),
-          // LanguageProvider के साथ error text
           Consumer<LanguageProvider>(
             builder: (context, languageProvider, child) {
               return Text(
@@ -187,7 +169,6 @@ class _MainCategoryViewState extends State<MainCategoryView> {
                   'Category Not Available',
                   'కేటగిరీ అందుబాటులో లేదు',
                 ),
-
                 style: GoogleFonts.jost(fontSize: 16.sp),
               );
             },
@@ -199,7 +180,7 @@ class _MainCategoryViewState extends State<MainCategoryView> {
                 isLoading = true;
                 hasError = false;
               });
-              fetchCategories(widget.categoy_id.toString());
+              fetchCategories(widget.categoy_id);
             },
             child: Consumer<LanguageProvider>(
               builder: (context, languageProvider, child) {
@@ -240,7 +221,7 @@ class _MainCategoryViewState extends State<MainCategoryView> {
       body: Column(
         children: [
           SizedBox(height: 20.h),
-          // ✅ App Bar - LanguageProvider के साथ
+          // App Bar - with LanguageProvider
           Container(
             width: double.infinity,
             height: 60.h,
@@ -282,11 +263,9 @@ class _MainCategoryViewState extends State<MainCategoryView> {
                     ),
                   ),
                   SizedBox(width: 16.w),
-                  // Screen title - LanguageProvider के साथ
+                  // Screen title - with LanguageProvider
                   Consumer<LanguageProvider>(
                     builder: (context, languageProvider, child) {
-                      // यहाँ हम widget.category_name को ही दिखा रहे हैं
-                      // क्योंकि यह पहले से ही selected language में decode होकर आ चुका है।
                       return Text(
                         widget.category_name,
                         style: GoogleFonts.jost(
@@ -301,7 +280,7 @@ class _MainCategoryViewState extends State<MainCategoryView> {
             ),
           ),
 
-          /// ✅ Fixed content area
+          /// Fixed content area
           Expanded(
             child: hasError
                 ? _buildErrorWidget()

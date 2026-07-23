@@ -1,22 +1,25 @@
-import 'dart:convert';
 import 'package:fluttertoast/fluttertoast.dart';
-import 'package:http/http.dart' as http;
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
 import '../ProductDetailScreen/product_details_screen.dart';
-import '../utils/api_constants.dart';
+import '../compat/app_state.dart';
+import '../data/repositories/repositories.dart';
 import '../utils/colors.dart';
 import '../utils/responsive_helper.dart';
 import '../Provider/cart_provider.dart';
 import '../Provider/language_provider.dart';
 
+/// Special-product tile — exact legacy visual tree (wide 200.h x 100.h image,
+/// padded content column, no fixed card height), wired to the new backend:
+/// cart through [CartProvider] (server-authoritative), wishlist through
+/// [Repos.wishlist], delivery time from [AppState], and ABSOLUTE image URLs.
 class SpProduct extends StatefulWidget {
   final Map<String, dynamic> product;
   final String userId;
-  final int branchId; // ✅ ADD
+  final String branchId;
   final VoidCallback? onCartUpdated;
   final VoidCallback? onWishlistUpdated;
   final VoidCallback? onCategoryBack;
@@ -24,12 +27,11 @@ class SpProduct extends StatefulWidget {
   const SpProduct({
     Key? key,
     required this.product,
-    required this.userId,
-    required this.branchId,
+    this.userId = '',
+    this.branchId = '',
     this.onCartUpdated,
     this.onWishlistUpdated,
     this.onCategoryBack,
-
   }) : super(key: key);
 
   @override
@@ -42,11 +44,16 @@ class _SpProductState extends State<SpProduct> {
   bool isWishlisted = false;
   bool isWishlistLoading = false;
 
+  String get _userId => widget.userId.isNotEmpty ? widget.userId : AppState.userId;
+  String get _branchId =>
+      widget.branchId.isNotEmpty ? widget.branchId : AppState.branchIdOrEmpty;
+
   @override
   void initState() {
     super.initState();
-    // Delivery time is now read from CartProvider in didChangeDependencies
-    // Wishlist check is deferred — only checked when heart icon is tapped
+    deliveryTime =
+        AppState.deliveryTimeText.isNotEmpty ? AppState.deliveryTimeText : '17 MIN';
+    checkWishlistStatus();
   }
 
   // Helper method to get product name based on selected language
@@ -69,39 +76,23 @@ class _SpProductState extends State<SpProduct> {
   }
 
   Future<void> checkWishlistStatus() async {
-    if (widget.userId.isEmpty) return;
-
-    setState(() {
-      isWishlistLoading = true;
-    });
-
+    if (_userId.isEmpty) return;
+    setState(() => isWishlistLoading = true);
     try {
-      final url = Uri.parse('${ApiConstants.CHECK_WISHLIST}?user_id=${widget.userId}&product_id=${widget.product['id']}');
-      final response = await http.get(url);
-      final data = json.decode(response.body);
-
-      if (data['success']) {
-        setState(() {
-          isWishlisted = data['is_wishlisted'] ?? false;
-        });
-      }
+      final inList = await Repos.wishlist.check(widget.product['id'].toString());
+      if (mounted) setState(() => isWishlisted = inList);
     } catch (e) {
-      print('Error checking wishlist status: $e');
+      debugPrint('Error checking wishlist status: $e');
     } finally {
-      setState(() {
-        isWishlistLoading = false;
-      });
+      if (mounted) setState(() => isWishlistLoading = false);
     }
   }
 
   Future<void> toggleWishlist(BuildContext context) async {
-    if (widget.userId.isEmpty) {
+    if (_userId.isEmpty) {
       Fluttertoast.showToast(
-        msg: getText(
-            context,
-            "Please login to add to wishlist",
-            "విష్లిస్ట్‌కి జోడించడానికి దయచేసి లాగిన్ అవ్వండి"
-        ),
+        msg: getText(context, "Please login to add to wishlist",
+            "విష్లిస్ట్‌కి జోడించడానికి దయచేసి లాగిన్ అవ్వండి"),
         toastLength: Toast.LENGTH_SHORT,
         gravity: ToastGravity.BOTTOM,
         backgroundColor: Colors.red,
@@ -110,40 +101,27 @@ class _SpProductState extends State<SpProduct> {
       return;
     }
 
-    setState(() {
-      isWishlistLoading = true;
-    });
-
+    setState(() => isWishlistLoading = true);
     try {
-      final url = Uri.parse(isWishlisted ? ApiConstants.REMOVE_FROM_WISHLIST : ApiConstants.ADD_TO_WISHLIST);
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: json.encode({
-          'user_id': widget.userId,
-          'product_id': widget.product['id'],
-        }),
-      );
-
-      final data = json.decode(response.body);
-      if (data['success']) {
-        setState(() {
-          isWishlisted = !isWishlisted;
-        });
-        widget.onWishlistUpdated?.call();
-
-        Fluttertoast.showToast(
-          msg: isWishlisted
-              ? getText(context, "Added to wishlist", "విష్లిస్ట్‌కి జోడించబడింది")
-              : getText(context, "Removed from wishlist", "విష్లిస్ట్ నుండి తీసివేయబడింది"),
-          toastLength: Toast.LENGTH_SHORT,
-          gravity: ToastGravity.BOTTOM,
-          backgroundColor: isWishlisted ? Colors.green : Colors.orange,
-          textColor: Colors.white,
-        );
+      final productId = widget.product['id'].toString();
+      if (isWishlisted) {
+        await Repos.wishlist.remove(productId);
+      } else {
+        await Repos.wishlist.add(productId);
       }
+      setState(() => isWishlisted = !isWishlisted);
+      widget.onWishlistUpdated?.call();
+      Fluttertoast.showToast(
+        msg: isWishlisted
+            ? getText(context, "Added to wishlist", "విష్లిస్ట్‌కి జోడించబడింది")
+            : getText(context, "Removed from wishlist", "విష్లిస్ట్ నుండి తీసివేయబడింది"),
+        toastLength: Toast.LENGTH_SHORT,
+        gravity: ToastGravity.BOTTOM,
+        backgroundColor: isWishlisted ? Colors.green : Colors.orange,
+        textColor: Colors.white,
+      );
     } catch (e) {
-      print('Error toggling wishlist: $e');
+      debugPrint('Error toggling wishlist: $e');
       Fluttertoast.showToast(
         msg: getText(context, "Something went wrong", "ఏదో తప్పు జరిగింది"),
         toastLength: Toast.LENGTH_SHORT,
@@ -152,97 +130,33 @@ class _SpProductState extends State<SpProduct> {
         textColor: Colors.white,
       );
     } finally {
-      setState(() {
-        isWishlistLoading = false;
-      });
+      if (mounted) setState(() => isWishlistLoading = false);
     }
   }
-
-  Future<void> fetchDeliveryTime() async {
-    try {
-      print("Branch ID inside fetchDeliveryTime: ${widget.branchId}");
-
-      final url = Uri.parse(
-          ApiConstants.DELIVERY_TIME + "?branch_id=${widget.branchId}"
-      );
-
-      print("API HIT URL: $url");
-
-      final response = await http.get(url);
-      final data = json.decode(response.body);
-
-      print("API RESPONSE: $data");
-
-      if (data['success']) {
-        setState(() {
-          deliveryTime = data['data']['time'].toString();
-        });
-      } else {
-        setState(() {
-          deliveryTime = 'No time found';
-        });
-      }
-
-    } catch (e) {
-      print("ERROR IN fetchDeliveryTime: $e");
-
-      setState(() {
-        deliveryTime = 'Error fetching time';
-      });
-    }
-  }
-
-
 
   // Helper method to show toast message
   void _showToastMessage(BuildContext context, String message) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
-        duration: Duration(seconds: 2),
+        duration: const Duration(seconds: 2),
         backgroundColor: AppColors.errorColor,
       ),
     );
   }
 
-  Future<void> addToCart(BuildContext context, int variantId, String imageUrl) async {
-    setState(() {
-      isLoading = true;
-    });
-
+  Future<void> addToCart(BuildContext context, String variantId, String imageUrl) async {
+    setState(() => isLoading = true);
     try {
-      final productId = widget.product['id'].toString();
-
-      final url = Uri.parse(ApiConstants.ADD_TO_CART);
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: json.encode({
-          'user_id': widget.userId.toString(),
-          'product_id': productId,
-          'variant_id': variantId.toString(),
-          'quantity': 1,
-          'image_url': imageUrl,
-          'branch_id' : widget.branchId.toString(),
-        }),
+      final cartProvider = Provider.of<CartProvider>(context, listen: false);
+      final ok = await cartProvider.addItem(
+        userId: _userId,
+        branchId: _branchId,
+        productId: widget.product['id'].toString(),
+        variantId: variantId,
       );
-
-      final data = json.decode(response.body);
-
-      if (response.statusCode == 200 && data['success'] == true) {
-        final cartProvider = Provider.of<CartProvider>(context, listen: false);
-
-        cartProvider.updateCartQuantities(
-          widget.userId,
-          productId,
-          variantId.toString(),
-          1,
-          data['cart_id'] ?? 0,
-        );
-
+      if (ok) {
         widget.onCartUpdated?.call();
-        setState(() {});
-
         Fluttertoast.showToast(
           msg: getText(context, "Added to cart", "కార్ట్‌కి జోడించబడింది"),
           toastLength: Toast.LENGTH_SHORT,
@@ -252,121 +166,49 @@ class _SpProductState extends State<SpProduct> {
         );
       } else {
         Fluttertoast.showToast(
-          msg: data['message'] ?? getText(context, "Failed to add to cart", "కార్ట్‌కి జోడించడం విఫలమైంది"),
+          msg: getText(context, "Failed to add to cart", "కార్ట్‌కి జోడించడం విఫలమైంది"),
           toastLength: Toast.LENGTH_SHORT,
           gravity: ToastGravity.BOTTOM,
           backgroundColor: Colors.red,
           textColor: Colors.white,
         );
       }
-    } catch (e) {
-      print('❌ Error adding to cart: $e');
-      Fluttertoast.showToast(
-        msg: getText(context, "Something went wrong", "ఏదో తప్పు జరిగింది"),
-        toastLength: Toast.LENGTH_SHORT,
-        gravity: ToastGravity.BOTTOM,
-        backgroundColor: Colors.red,
-        textColor: Colors.white,
-      );
     } finally {
-      setState(() {
-        isLoading = false;
-      });
+      if (mounted) setState(() => isLoading = false);
     }
   }
 
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final cartProvider = Provider.of<CartProvider>(context, listen: false);
-
-    // Read delivery time from CartProvider (set by HomeScreen once)
-    // to avoid N duplicate API calls from every SpProduct
-    final providerTime = cartProvider.deliveryTime;
-    if (providerTime.isNotEmpty && deliveryTime == '17 MIN') {
-      setState(() {
-        deliveryTime = providerTime;
-      });
-    }
-    // Fallback: fetch once if provider doesn't have it yet
-    if (providerTime.isEmpty && deliveryTime == '17 MIN') {
-      fetchDeliveryTime();
-    }
-  }
-
-  Future<void> updateQuantity(BuildContext context, int variantId, int newQuantity) async {
-    setState(() {
-      isLoading = true;
-    });
-
+  Future<void> updateQuantity(BuildContext context, String variantId, int newQuantity) async {
+    setState(() => isLoading = true);
     try {
-      final variants = widget.product['variants'] as List;
-      final variant = variants.firstWhere(
-            (v) => int.tryParse(v['id']?.toString() ?? '0') == variantId,
-        orElse: () => null,
+      final variants = widget.product['variants'] as List<dynamic>;
+      final variant = variants.cast<Map<String, dynamic>>().firstWhere(
+        (v) => (v['id'] ?? '').toString() == variantId,
+        orElse: () => <String, dynamic>{},
       );
-
-      if (variant != null) {
+      if (variant.isNotEmpty) {
         final stock = int.tryParse(variant['stock']?.toString() ?? '0') ?? 0;
         if (newQuantity > stock) {
           _showToastMessage(
             context,
-            getText(
-                context,
-                'Only $stock items available in stock',
-                '$stock ఐటమ్లు మాత్రమే స్టాక్‌లో అందుబాటులో ఉన్నాయి'
-            ),
+            getText(context, 'Only $stock items available in stock',
+                '$stock ఐటమ్లు మాత్రమే స్టాక్‌లో అందుబాటులో ఉన్నాయి'),
           );
           return;
         }
       }
 
       final cartProvider = Provider.of<CartProvider>(context, listen: false);
-      final productId = widget.product['id'].toString();
-
-      int cartId = cartProvider.getCartId(widget.userId, productId, variantId.toString());
-
-      if (cartId == 0) {
-        cartId = await _findCartIdDirectly(widget.userId, productId, variantId.toString());
-
-        if (cartId == 0) {
-          print("⚠️ Cart item not found in server either");
-          Fluttertoast.showToast(
-            msg: getText(
-                context,
-                "Cart item not found. Please add it again.",
-                "కార్ట్ ఐటం కనుగొనబడలేదు. దయచేసి మళ్లీ జోడించండి."
-            ),
-            toastLength: Toast.LENGTH_SHORT,
-            gravity: ToastGravity.BOTTOM,
-            backgroundColor: Colors.red,
-            textColor: Colors.white,
-          );
-          return;
-        }
-      }
-
-      final url = Uri.parse(ApiConstants.UPDATE_QUANTITY);
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: json.encode({'id': cartId, 'quantity': newQuantity}),
+      final ok = await cartProvider.changeQuantity(
+        userId: _userId,
+        branchId: _branchId,
+        productId: widget.product['id'].toString(),
+        variantId: variantId,
+        quantity: newQuantity,
       );
-
-      final data = json.decode(response.body);
-      if (data['success']) {
-        _refreshCartData(context);
-        cartProvider.updateCartQuantities(
-          widget.userId,
-          productId,
-          variantId.toString(),
-          newQuantity,
-          cartId,
-        );
+      if (ok) {
         widget.onCartUpdated?.call();
-        setState(() {});
       } else {
-        print("⚠️ Update quantity API failed: ${data['message']}");
         Fluttertoast.showToast(
           msg: getText(context, "Failed to update quantity", "పరిమాణం నవీకరించడం విఫలమైంది"),
           toastLength: Toast.LENGTH_SHORT,
@@ -375,72 +217,23 @@ class _SpProductState extends State<SpProduct> {
           textColor: Colors.white,
         );
       }
-    } catch (e) {
-      print('Error updating quantity: $e');
-      Fluttertoast.showToast(
-        msg: getText(context, "Network error. Please try again.", "నెట్‌వర్క్ లోపం. దయచేసి మళ్లీ ప్రయత్నించండి."),
-        toastLength: Toast.LENGTH_SHORT,
-        gravity: ToastGravity.BOTTOM,
-        backgroundColor: Colors.red,
-        textColor: Colors.white,
-      );
     } finally {
-      setState(() {
-        isLoading = false;
-      });
+      if (mounted) setState(() => isLoading = false);
     }
   }
 
-  Future<int> _findCartIdDirectly(String userId, String productId, String variantId) async {
-    try {
-      final url = Uri.parse('${ApiConstants.GET_CART_ITEMS}?user_id=$userId');
-      final response = await http.get(url);
-      final data = json.decode(response.body);
-
-      if (data['success']) {
-        final cartItems = List<Map<String, dynamic>>.from(data['cart'] ?? []);
-
-        for (var item in cartItems) {
-          final itemProductId = item['product_id'].toString();
-          final itemVariantId = item['variant_id'].toString();
-
-          if (itemProductId == productId && itemVariantId == variantId) {
-            return item['id'] as int;
-          }
-        }
-      }
-    } catch (e) {
-      print('Error finding cart ID directly: $e');
-    }
-
-    return 0;
-  }
-
-  void _refreshCartData(BuildContext context) {
-    final cartProvider = Provider.of<CartProvider>(context, listen: false);
-    cartProvider.refreshCartData(widget.userId,widget.branchId).then((_) {
-      setState(() {});
-    });
-  }
-
-  Future<void> removeFromCart(BuildContext context, int variantId) async {
-    setState(() {
-      isLoading = true;
-    });
-
+  Future<void> removeFromCart(BuildContext context, String variantId) async {
+    setState(() => isLoading = true);
     try {
       final cartProvider = Provider.of<CartProvider>(context, listen: false);
-      final cartId = cartProvider.getCartId(widget.userId, widget.product['id'].toString(), variantId.toString());
-
-      final url = Uri.parse('${ApiConstants.REMOVE_CART_ITEM}?id=$cartId');
-      final response = await http.get(url);
-      final data = json.decode(response.body);
-
-      if (data['success']) {
-        cartProvider.removeCartItem(widget.userId, widget.product['id'].toString(), variantId.toString());
+      final ok = await cartProvider.removeItem(
+        userId: _userId,
+        branchId: _branchId,
+        productId: widget.product['id'].toString(),
+        variantId: variantId,
+      );
+      if (ok) {
         widget.onCartUpdated?.call();
-        setState(() {});
-
         Fluttertoast.showToast(
           msg: getText(context, "Removed from cart", "కార్ట్ నుండి తీసివేయబడింది"),
           toastLength: Toast.LENGTH_SHORT,
@@ -449,28 +242,20 @@ class _SpProductState extends State<SpProduct> {
           textColor: Colors.white,
         );
       }
-    } catch (e) {
-      print('Error removing from cart: $e');
-      Fluttertoast.showToast(
-        msg: getText(context, "Error removing from cart", "కార్ట్ నుండి తీసివేయడంలో లోపం"),
-        toastLength: Toast.LENGTH_SHORT,
-        gravity: ToastGravity.BOTTOM,
-        backgroundColor: Colors.red,
-        textColor: Colors.white,
-      );
     } finally {
-      setState(() {
-        isLoading = false;
-      });
+      if (mounted) setState(() => isLoading = false);
     }
+  }
+
+  String _imageOf(Map<String, dynamic> product) {
+    final images = product['images'];
+    if (images is List && images.isNotEmpty) return images[0].toString();
+    return (product['image'] ?? '').toString();
   }
 
   void _showVariantBottomSheet(BuildContext context, List variants) {
     final productName = getProductName(context);
-    final productImage =
-    (widget.product['images'] != null && widget.product['images'].isNotEmpty)
-        ? widget.product['images'][0]
-        : null;
+    final productImage = _imageOf(widget.product);
 
     showModalBottomSheet(
       context: context,
@@ -480,25 +265,23 @@ class _SpProductState extends State<SpProduct> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(20.r)),
       ),
       builder: (context) {
-
         return Padding(
           padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
           child: StatefulBuilder(
             builder: (context, setModalState) {
               final cartProvider = Provider.of<CartProvider>(context);
 
-              void _localAddToCart(int variantId) async {
-                final imageUrl = ApiConstants.BASE_URL + '/product_api_project/$productImage';
-                await addToCart(context, variantId, imageUrl);
+              void localAddToCart(String variantId) async {
+                await addToCart(context, variantId, productImage);
                 setModalState(() {});
               }
 
-              void _localUpdateQuantity(int variantId, int newQty) async {
+              void localUpdateQuantity(String variantId, int newQty) async {
                 await updateQuantity(context, variantId, newQty);
                 setModalState(() {});
               }
 
-              void _localRemoveFromCart(int variantId) async {
+              void localRemoveFromCart(String variantId) async {
                 await removeFromCart(context, variantId);
                 setModalState(() {});
               }
@@ -534,25 +317,27 @@ class _SpProductState extends State<SpProduct> {
                       fit: FlexFit.loose,
                       child: ListView.builder(
                         shrinkWrap: true,
-                        physics: ClampingScrollPhysics(),
+                        physics: const ClampingScrollPhysics(),
                         itemCount: variants.length,
                         itemBuilder: (context, index) {
                           final variant = variants[index];
                           final variantName = variant['name'] ?? 'N/A';
 
-                          final variantPrice = double.tryParse(variant['price']?.toString() ?? '0') ?? 0;
+                          final variantPrice =
+                              double.tryParse(variant['price']?.toString() ?? '0') ?? 0;
                           final stock = int.tryParse(variant['stock']?.toString() ?? '0') ?? 0;
-                          final variantSellingPrice = double.tryParse(variant['selling_price']?.toString() ?? '0') ?? 0;
+                          final variantSellingPrice =
+                              double.tryParse(variant['selling_price']?.toString() ?? '0') ?? 0;
 
                           final discountPercentage = variantPrice > 0
                               ? ((variantPrice - variantSellingPrice) / variantPrice * 100).round()
                               : 0;
 
-                          final variantId = int.tryParse(variant['id']?.toString() ?? '0') ?? 0;
+                          final variantId = variant['id']?.toString() ?? '';
                           final quantity = cartProvider.getQuantity(
-                            widget.userId,
+                            _userId,
                             widget.product['id'].toString(),
-                            variantId.toString(),
+                            variantId,
                           );
 
                           final isOutOfStock = stock <= 0;
@@ -589,8 +374,7 @@ class _SpProductState extends State<SpProduct> {
                                               borderRadius: BorderRadius.circular(12.r),
                                               child: Center(
                                                 child: Image.network(
-                                                  ApiConstants.BASE_URL +
-                                                      '/product_api_project/${widget.product['images'][0]}',
+                                                  productImage,
                                                   width: ResponsiveHelper.getResponsiveWidth(context,
                                                     mobile: 40.w,
                                                     tablet: 50.w,
@@ -644,7 +428,6 @@ class _SpProductState extends State<SpProduct> {
                                           variantName,
                                           overflow: TextOverflow.ellipsis,
                                           maxLines: 2,
-
                                         ),
                                       ),
                                       LayoutBuilder(
@@ -691,9 +474,9 @@ class _SpProductState extends State<SpProduct> {
                                                   quantity,
                                                   variantId,
                                                   stock,
-                                                  _localRemoveFromCart,
-                                                  _localUpdateQuantity,
-                                                  _localAddToCart,
+                                                  localRemoveFromCart,
+                                                  localUpdateQuantity,
+                                                  localAddToCart,
                                                 ),
                                               ],
                                             );
@@ -728,9 +511,9 @@ class _SpProductState extends State<SpProduct> {
                                                   quantity,
                                                   variantId,
                                                   stock,
-                                                  _localRemoveFromCart,
-                                                  _localUpdateQuantity,
-                                                  _localAddToCart,
+                                                  localRemoveFromCart,
+                                                  localUpdateQuantity,
+                                                  localAddToCart,
                                                 ),
                                               ],
                                             );
@@ -769,11 +552,11 @@ class _SpProductState extends State<SpProduct> {
   Widget _buildCartControl(
       BuildContext context,
       int quantity,
-      int variantId,
+      String variantId,
       int stock,
-      Function(int) removeFromCart,
-      Function(int, int) updateQuantity,
-      Function(int) addToCart) {
+      Function(String) removeFromCart,
+      Function(String, int) updateQuantity,
+      Function(String) addToCart) {
     final decoration = BoxDecoration(
       color: AppColors.primaryColor,
       borderRadius: BorderRadius.circular(7.r),
@@ -873,10 +656,7 @@ class _SpProductState extends State<SpProduct> {
         return Consumer<LanguageProvider>(
           builder: (context, languageProvider, child) {
             final productName = getProductName(context);
-            final productImage =
-            (widget.product['images'] != null && widget.product['images'].isNotEmpty)
-                ? widget.product['images'][0]
-                : null;
+            final productImage = _imageOf(widget.product);
 
             final variants = widget.product['variants'] as List?;
             final Map<String, dynamic>? firstVariant =
@@ -892,11 +672,7 @@ class _SpProductState extends State<SpProduct> {
                 ? ((variantPrice - variantSellingPrice) / variantPrice * 100).round()
                 : 0;
 
-            final int? firstVariantId =
-                int.tryParse(firstVariant?['id']?.toString() ?? '0') ?? 0;
-
-            final productQuantity = cartProvider.getProductTotalQuantity(
-                widget.userId, widget.product['id'].toString());
+            final String firstVariantId = firstVariant?['id']?.toString() ?? '';
 
             final allOutOfStock = variants != null &&
                 variants.isNotEmpty &&
@@ -938,8 +714,7 @@ class _SpProductState extends State<SpProduct> {
                                 borderRadius: BorderRadius.circular(12.r),
                                 child: Center(
                                   child: Image.network(
-                                    ApiConstants.BASE_URL +
-                                        '/product_api_project/$productImage',
+                                    productImage,
                                     width: 80.w,
                                     height: 80.h,
                                     fit: BoxFit.cover,
@@ -1000,7 +775,7 @@ class _SpProductState extends State<SpProduct> {
                                   child: CircularProgressIndicator(
                                     strokeWidth: 2,
                                     valueColor:
-                                    AlwaysStoppedAnimation<Color>(
+                                    const AlwaysStoppedAnimation<Color>(
                                         AppColors.primaryColor),
                                   ),
                                 )
@@ -1144,7 +919,7 @@ class _SpProductState extends State<SpProduct> {
                       ),
 
 
-                      
+
                     ],
                   ),
                 ),
@@ -1171,15 +946,12 @@ class _SpProductState extends State<SpProduct> {
     );
   }
 
-  Widget _buildMainCartButton(BuildContext context, List? variants, int? variantId, int stock) {
-    final productImage =
-    (widget.product['images'] != null && widget.product['images'].isNotEmpty)
-        ? widget.product['images'][0]
-        : null;
+  Widget _buildMainCartButton(BuildContext context, List? variants, String variantId, int stock) {
+    final productImage = _imageOf(widget.product);
 
     return Consumer<CartProvider>(
       builder: (context, cartProvider, child) {
-        final productQuantity = cartProvider.getProductTotalQuantity(widget.userId, widget.product['id'].toString());
+        final productQuantity = cartProvider.getProductTotalQuantity(_userId, widget.product['id'].toString());
 
         if (productQuantity > 0) {
           return Container(
@@ -1192,7 +964,7 @@ class _SpProductState extends State<SpProduct> {
             child: Container(
               height: 24.h,
               decoration: BoxDecoration(
-                gradient: LinearGradient(
+                gradient: const LinearGradient(
                   colors: [AppColors.secondaryColor, AppColors.primaryColor],
                   begin: Alignment.centerRight,
                   end: Alignment.centerLeft,
@@ -1215,29 +987,18 @@ class _SpProductState extends State<SpProduct> {
                       color: AppColors.primaryTextColor,
                     ),
                     onPressed: () {
-                      if (productQuantity == 1) {
-                        final variants = widget.product['variants'] as List;
-                        for (var variant in variants) {
-                          final variantId = int.tryParse(variant['id']?.toString() ?? '0') ?? 0;
-                          final quantity = cartProvider
-                              .getQuantity(widget.userId, widget.product['id'].toString(), variantId.toString());
-
-                          if (quantity > 0) {
-                            removeFromCart(context, variantId);
-                            break;
+                      final vars = widget.product['variants'] as List;
+                      for (var variant in vars) {
+                        final vId = variant['id']?.toString() ?? '';
+                        final quantity = cartProvider
+                            .getQuantity(_userId, widget.product['id'].toString(), vId);
+                        if (quantity > 0) {
+                          if (quantity == 1) {
+                            removeFromCart(context, vId);
+                          } else {
+                            updateQuantity(context, vId, quantity - 1);
                           }
-                        }
-                      } else {
-                        final variants = widget.product['variants'] as List;
-                        for (var variant in variants) {
-                          final variantId = int.tryParse(variant['id']?.toString() ?? '0') ?? 0;
-                          final quantity = cartProvider
-                              .getQuantity(widget.userId, widget.product['id'].toString(), variantId.toString());
-
-                          if (quantity > 0) {
-                            updateQuantity(context, variantId, quantity - 1);
-                            break;
-                          }
+                          break;
                         }
                       }
                     },
@@ -1267,12 +1028,11 @@ class _SpProductState extends State<SpProduct> {
                       color: AppColors.primaryTextColor,
                     ),
                     onPressed: () {
-                      final variants = widget.product['variants'] as List;
-                      for (var variant in variants) {
-                        final variantId = int.tryParse(variant['id']?.toString() ?? '0') ?? 0;
+                      final vars = widget.product['variants'] as List;
+                      for (var variant in vars) {
+                        final vId = variant['id']?.toString() ?? '';
                         final quantity = cartProvider
-                            .getQuantity(widget.userId, widget.product['id'].toString(), variantId.toString());
-
+                            .getQuantity(_userId, widget.product['id'].toString(), vId);
                         if (quantity > 0) {
                           final variantStock = int.tryParse(variant['stock']?.toString() ?? '0') ?? 0;
                           if (quantity + 1 > variantStock) {
@@ -1282,7 +1042,7 @@ class _SpProductState extends State<SpProduct> {
                                 '$variantStock ఐటమ్లు మాత్రమే స్టాక్‌లో అందుబాటులో ఉన్నాయి'
                             ));
                           } else {
-                            updateQuantity(context, variantId, quantity + 1);
+                            updateQuantity(context, vId, quantity + 1);
                           }
                           break;
                         }
@@ -1298,13 +1058,11 @@ class _SpProductState extends State<SpProduct> {
             onTap: () {
               if ((variants?.length ?? 0) > 1) {
                 _showVariantBottomSheet(context, variants!);
-              } else if (variantId != null) {
+              } else if (variantId.isNotEmpty) {
                 if (stock <= 0) {
                   _showToastMessage(context, getText(context, 'Product is out of stock', 'ఉత్పత్తి స్టాక్లో లేదు'));
                 } else {
-                  final imageUrl = ApiConstants.BASE_URL +
-                      '/product_api_project/$productImage';
-                  addToCart(context, variantId, imageUrl);
+                  addToCart(context, variantId, productImage);
                 }
               }
             },
@@ -1312,7 +1070,7 @@ class _SpProductState extends State<SpProduct> {
               width: double.infinity,
               height: 24.h,
               decoration: BoxDecoration(
-                gradient: LinearGradient(
+                gradient: const LinearGradient(
                   colors: [AppColors.secondaryColor, AppColors.primaryColor],
                   begin: Alignment.centerRight,
                   end: Alignment.centerLeft,

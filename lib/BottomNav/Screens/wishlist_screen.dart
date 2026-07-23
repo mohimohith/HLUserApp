@@ -1,14 +1,13 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../Provider/cart_provider.dart';
 import '../../CustomWidgets/product_card.dart';
-import '../../utils/api_constants.dart';
+import '../../compat/app_state.dart';
+import '../../compat/legacy_adapters.dart';
+import '../../data/repositories/repositories.dart';
 import '../../utils/colors.dart';
 import '../bottomNavScreen.dart';
 import 'cartScreen.dart';
@@ -30,7 +29,7 @@ class _WishlistScreenState extends State<WishlistScreen> {
   String userName = "";
   String userID = "";
 
-  int branchId = 0;
+  String branchId = '';
   String branchName  = "";
 
   List<Map<String, dynamic>> cartList = [];
@@ -40,105 +39,56 @@ class _WishlistScreenState extends State<WishlistScreen> {
     super.initState();
     fetchUserData();
     fetchLocation();
-
   }
 
 
   Future<void> fetchLocation() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    String? uArea = prefs.getString('user_area_h');
-    String? uCity = prefs.getString('user_city_h');
-    int bId = prefs.getInt('selected_branch_id') ?? 0;
-    String? bName  = prefs.getString('selected_branch_name');
-
-    // agar dono me se koi ek bhi null na ho
-    if ((uArea != null && uArea.trim().isNotEmpty) ||
-        (uCity != null && uCity.trim().isNotEmpty)) {
-      setState(() {
-        branchId = bId;
-        branchName = bName ?? "";
-      });
-
-      // await  fetchProductsByType('Everyday Essentials');
-    }
+    setState(() {
+      branchId = AppState.branchIdOrEmpty;
+      branchName = AppState.branchName ?? "";
+    });
   }
 
   Future<void> fetchUserData() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    String? user_ID = prefs.getString('user_id');
-    if (user_ID != null) {
-      setState(() => userID = user_ID);
-      await fetchCartQuantity(user_ID);
-      fetchWishlist(user_ID);
+    final uid = AppState.userId;
+    if (uid.isNotEmpty) {
+      setState(() => userID = uid);
+      await fetchCartQuantity(uid);
+      fetchWishlist(uid);
     }
   }
 
 
-  /// ✅ Cart quantity fetch
+  /// Cart quantity fetch from the server cart.
   Future<void> fetchCartQuantity(String id) async {
-    final url = Uri.parse(
-      '${ApiConstants.GET_CART_ITEMS}?user_id=$id',
-    );
     try {
-      final response = await http.get(url);
-      final data = json.decode(response.body);
-
-      if (data['success']) {
-        final cartItems = List<Map<String, dynamic>>.from(data['cart'] ?? []);
-        setState(() {
-          cartList = cartItems;
-        });
-      } else {
-        setState(() {
-          cartList = [];
-        });
-      }
-    } catch (e) {
+      final bid = AppState.branchIdOrEmpty;
+      if (bid.isEmpty) return;
+      final cart = await Repos.cart.getCart(bid);
       setState(() {
-        cartList = [];
+        cartList = cart.items.map((i) => {
+          'product_id': i.productId,
+          'variant_id': i.variantId ?? '',
+          'quantity': i.quantity,
+          'id': i.id,
+        }).toList();
       });
+    } catch (e) {
+      setState(() => cartList = []);
     }
   }
 
   Future<void> fetchWishlist(String userID) async {
     if (userID.isEmpty) return;
-
-    setState(() {
-      isLoading = true;
-    });
-
+    setState(() => isLoading = true);
     try {
-      final url = Uri.parse('${ApiConstants.GET_WISHLIST}?user_id=$userID');
-      final response = await http.get(url);
-
-      print("Wishlist API Response: ${response.body}"); // Debugging
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-
-        if (data['success'] == true && data['wishlist'] != null) {
-          setState(() {
-            wishlistProducts = List<Map<String, dynamic>>.from(data['wishlist']);
-          });
-        } else {
-          setState(() {
-            wishlistProducts = [];
-          });
-        }
-      } else {
-        setState(() {
-          wishlistProducts = [];
-        });
-      }
+      final items = await Repos.wishlist.list();
+      setState(() => wishlistProducts = LegacyAdapters.products(items));
     } catch (e) {
-      print('Error fetching wishlist: $e');
-      setState(() {
-        wishlistProducts = [];
-      });
+      debugPrint('Error fetching wishlist: $e');
+      setState(() => wishlistProducts = []);
     } finally {
-      setState(() {
-        isLoading = false;
-      });
+      setState(() => isLoading = false);
     }
   }
 
@@ -146,25 +96,13 @@ class _WishlistScreenState extends State<WishlistScreen> {
 
   Future<void> removeFromWishlist(String productId) async {
     try {
-      final url = Uri.parse(ApiConstants.REMOVE_FROM_WISHLIST);
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: json.encode({
-          'user_id': userID,
-          'product_id': productId,
-        }),
-      );
-
-      final data = json.decode(response.body);
-      if (data['success'] == true) {
-        // ✅ सिर्फ local list update करो, दोबारा full fetch की ज़रूरत नहीं
-        setState(() {
-          wishlistProducts.removeWhere((item) => item['product_id'].toString() == productId);
-        });
-      }
+      await Repos.wishlist.remove(productId);
+      setState(() {
+        wishlistProducts.removeWhere((item) =>
+            (item['id'] ?? item['product_id']).toString() == productId);
+      });
     } catch (e) {
-      print('Error removing from wishlist: $e');
+      debugPrint('Error removing from wishlist: $e');
     }
   }
 
@@ -310,7 +248,7 @@ class _WishlistScreenState extends State<WishlistScreen> {
                       return ProductCard(
                         product: product,
                         userId: userID,
-                        branchId: branchId,
+                        branchId: branchId.toString(),
                         onCartUpdated: () {
                           fetchCartQuantity(userID); // ✅ Real-time update
                         },

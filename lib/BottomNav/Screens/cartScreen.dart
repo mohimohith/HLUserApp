@@ -4,31 +4,39 @@ import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
-import 'dart:convert';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../../Checkout/checkout_screen.dart';
 import '../../Provider/cart_provider.dart';
 import '../../CustomWidgets/product_card.dart';
 import '../../SearchProduct/search_product.dart';
-import '../../utils/api_constants.dart';
+import '../../compat/app_state.dart';
+import '../../compat/legacy_adapters.dart';
+import '../../data/models/cart.dart';
+import '../../data/models/coupon.dart';
+import '../../data/models/gift.dart';
+import '../../data/repositories/repositories.dart';
 import '../../utils/colors.dart';
 
+/// Cart — exact legacy visual tree, wired to the new backend:
+/// cart lines + totals from [Repos.cart], charges from BranchSettings, gift bar
+/// from [Repos.gifts], coupon via [Repos.coupons.validate] and "Everyday
+/// Essentials" from [Repos.products]. Quantity mutations go through
+/// [CartProvider] then re-fetch the authoritative cart.
 class CartScreen extends StatefulWidget {
   @override
   _CartScreenState createState() => _CartScreenState();
 }
 
 class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
-  List<dynamic> cartItems = [];
+  List<CartItem> cartItems = [];
   bool isLoading = true;
-  Map<int, bool> itemCheckStates = {};
   double totalSellingAmount = 0.0;
   double totalPriceAmount = 0.0;
   String userName = "";
   String userEmail = "";
-  String userId = "";
+
+  String get userId => AppState.userId;
+  String get branchId => AppState.branchIdOrEmpty;
 
   // Data variables
   String deliveryTime = '15 minutes';
@@ -37,34 +45,33 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
   double giftTarget = 0;
   String giftName = '';
   String giftImage = '';
+  bool _hasGift = false;
 
   bool get isGiftUnlocked => totalSellingAmount >= giftTarget;
 
   double get remainingAmount => giftTarget - totalSellingAmount;
-  double get progressValue => (totalSellingAmount / giftTarget).clamp(0.0, 1.0);
+  double get progressValue =>
+      giftTarget <= 0 ? 0.0 : (totalSellingAmount / giftTarget).clamp(0.0, 1.0);
 
   List everydayEssentialsList = [];
-  List<Map<String, dynamic>> _couponList = [];
 
-  TextEditingController _couponController = TextEditingController();
+  final TextEditingController _couponController = TextEditingController();
   bool _isApplyingCoupon = false;
 
-  // Converted to double
+  // Charges (from BranchSettings)
   double deliveryCharge = 0.0;
   double minium_amount = 0.0;
   double handling_charge = 0.0;
   double freeDelivery = 0.0;
 
-  // Store selected coupon details
+  // Store selected coupon details. NOTE: the new backend returns the coupon
+  // discount as a rupee AMOUNT (not a percentage like the old API), so
+  // [selectedDiscount] now holds the computed rupee discount.
   String? selectedCodeName;
-  double selectedDiscount = 0.0; // Changed to double
-  String? selectedExpiry;
-  double selectedMinAmount = 0.0; // Changed to double
+  double selectedDiscount = 0.0;
+  double selectedMinAmount = 0.0;
 
-  int branchId = 0;
-  String branchName = "";
-
-  // Updated final amount calculation with coupon discount
+  // Updated final amount calculation with coupon discount (rupee discount).
   double get finalWithCharge {
     double baseAmount = totalSellingAmount + handling_charge;
 
@@ -75,8 +82,7 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
 
     // Apply coupon discount if applicable
     if (selectedDiscount > 0 && totalSellingAmount >= selectedMinAmount) {
-      double discountAmount = (totalSellingAmount * selectedDiscount) / 100;
-      baseAmount -= discountAmount;
+      baseAmount -= selectedDiscount;
     }
 
     return baseAmount > 0 ? baseAmount : 0.0;
@@ -86,10 +92,9 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
     // Normal saving (MRP - Selling Price)
     double saving = totalPriceAmount - totalSellingAmount;
 
-    // Coupon discount agar applicable hai to add kar do
+    // Coupon discount, if applicable
     if (selectedDiscount > 0 && totalSellingAmount >= selectedMinAmount) {
-      double discountAmount = (totalSellingAmount * selectedDiscount) / 100;
-      saving += discountAmount;
+      saving += selectedDiscount;
     }
 
     return saving;
@@ -105,342 +110,120 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _couponController.dispose();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      // App foreground में आने पर cart refresh करें
       _refreshCartData();
     }
   }
 
   Future<void> _initializeCart() async {
-    await fetchLocation();
-  }
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    // Provider changes are now handled via the Consumer rebuilds
-    // Auto-refresh removed to prevent:
-    // 1. setState after dispose when navigating away
-    // 2. Wiping provider cart data mid-addToCart
+    deliveryTime = AppState.deliveryTimeText.isNotEmpty
+        ? AppState.deliveryTimeText
+        : '15 minutes';
+    await _loadCharges();
+    await fetchProductsByType('Everyday Essentials');
+    await fetchGift();
+    await fetchCartItems();
   }
 
   Future<void> _refreshCartData() async {
     if (userId.isNotEmpty) {
-      if (mounted) {
-        await fetchCartItems(userId);
-      }
+      await fetchCartItems();
     }
   }
 
-  Future<void> fetchLocation() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    String? uArea = prefs.getString('user_area_h');
-    String? uCity = prefs.getString('user_city_h');
-    int bId = prefs.getInt('selected_branch_id') ?? 0;
-    String? bName = prefs.getString('selected_branch_name');
-
-    // agar dono me se koi ek bhi null na ho
-    if ((uArea != null && uArea.trim().isNotEmpty) ||
-        (uCity != null && uCity.trim().isNotEmpty)) {
-      setState(() {
-        branchId = bId;
-        branchName = bName ?? "";
-      });
-
-      await fetchDeliveryTime();
-      await fetchProductsByType('Everyday Essentials');
-      await fetchUserData();
-      await fetchHandlingCharge();
-      await fetchDeliveryCharge();
-      await fetchMinOrderAmount();
-      await fetchFreeDelivery();
-      await fetchGift();
-    }
-  }
-
-  Future<void> fetchDeliveryTime() async {
+  Future<void> _loadCharges() async {
+    if (branchId.isEmpty) return;
     try {
-      final response = await http.get(
-        Uri.parse(ApiConstants.DELIVERY_TIME + "?branch_id=$branchId"),
-      );
-
-      final data = json.decode(response.body);
-
-      if (data['success']) {
-        setState(() {
-          deliveryTime = data['data']['time'].toString();
-        });
-      } else {
-        setState(() {
-          deliveryTime = 'Not found';
-        });
-      }
-    } catch (e) {
+      final home = await Repos.home.getHome(branchId);
+      final s = home.settings;
+      if (!mounted) return;
       setState(() {
-        deliveryTime = 'Error fetching time';
+        handling_charge = s.handlingCharge;
+        deliveryCharge = s.deliveryCharge;
+        freeDelivery = s.freeDeliveryThreshold ?? 0.0;
+        minium_amount = s.minOrderAmount;
+        if (s.deliveryTimeText.isNotEmpty) deliveryTime = s.deliveryTimeText;
       });
+    } catch (e) {
+      debugPrint('Error loading charges: $e');
     }
   }
 
   Future<void> fetchGift() async {
+    if (branchId.isEmpty) return;
     try {
-      print("Fetching gift for branch: $branchId");
-
-      final response = await http.get(
-        Uri.parse(ApiConstants.VIEW_GIFT + "?branch_id=$branchId"),
-      );
-
-      print("GIFT API HIT URL: ${ApiConstants.VIEW_GIFT}?branch_id=$branchId");
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-
-        print("Gift API Response: $data"); // Debugging के लिए
-
-        if (data['success'] == true && data['data'] != null) {
-          setState(() {
-            giftPrice = int.tryParse(data['data']['gift_price']?.toString() ?? '0') ?? 0;
-
-            giftTarget = double.tryParse(
-                data['data']['gift_target_amount']?.toString() ?? '0') ?? 0.0;
-
-            giftName = data['data']['gift_name']?.toString() ?? '';
-
-            giftImage = data['data']['gift_image']?.toString() ?? '';
-          });
-
-          print(
-              "Gift Details - Price: $giftPrice, Target: $giftTarget, Name: $giftName");
-        } else {
-          print("Gift API success false or data null");
-
-          setState(() {
-            giftPrice = 0;
-            giftTarget = 0.0;
-            giftName = '';
-            giftImage = '';
-          });
-        }
-      } else {
-        print("Gift API failed with status: ${response.statusCode}");
+      final List<Gift> gifts = await Repos.gifts.list(branchId);
+      if (!mounted) return;
+      if (gifts.isEmpty) {
+        setState(() => _hasGift = false);
+        return;
       }
+      final gift = gifts.first;
+      setState(() {
+        _hasGift = true;
+        giftPrice = gift.price.round();
+        giftTarget = gift.targetAmount;
+        giftName = gift.name;
+        giftImage = gift.image ?? '';
+      });
     } catch (e) {
       debugPrint("Error fetching gift: $e");
-
-      setState(() {
-        giftPrice = 0;
-        giftTarget = 0.0;
-        giftName = '';
-        giftImage = '';
-      });
-    }
-  }
-
-  // Free Order value
-  Future<void> fetchFreeDelivery() async {
-    try {
-      final url = Uri.parse(
-          ApiConstants.GET_FREE_DELIVERY_AMOUNT + "?branch_id=$branchId");
-
-      final response = await http.get(url);
-      final data = json.decode(response.body);
-
-      if (data['success']) {
-        setState(() {
-          freeDelivery = double.tryParse(
-              data['data']['amount']?.toString() ?? '0') ?? 0.0;
-        });
-      } else {
-        setState(() {
-          freeDelivery = 0.0;
-        });
-      }
-    } catch (e) {
-      setState(() {
-        freeDelivery = 0.0;
-      });
-    }
-  }
-
-  Future<void> fetchDeliveryCharge() async {
-    try {
-      final url = Uri.parse(
-          ApiConstants.FETCH_DELIVERY_AMOUNT + "?branch_id=$branchId");
-
-      final response = await http.get(url);
-      final data = json.decode(response.body);
-
-      if (data['success']) {
-        setState(() {
-          deliveryCharge = double.tryParse(
-              data['data']['amount']?.toString() ?? '0') ?? 0.0;
-        });
-      } else {
-        setState(() {
-          deliveryCharge = 0.0;
-        });
-      }
-    } catch (e) {
-      setState(() {
-        deliveryCharge = 0.0;
-      });
-    }
-  }
-
-  Future<void> fetchMinOrderAmount() async {
-    try {
-      final url = Uri.parse(
-          ApiConstants.GET_MINIMUM_ORDER_AMOUT + "?branch_id=$branchId");
-
-      final response = await http.get(url);
-      final data = json.decode(response.body);
-
-      if (data['success']) {
-        setState(() {
-          minium_amount = double.tryParse(
-              data['data']['amount']?.toString() ?? '0') ?? 0.0;
-        });
-      } else {
-        setState(() {
-          minium_amount = 0.0;
-        });
-      }
-    } catch (e) {
-      setState(() {
-        minium_amount = 0.0;
-      });
-    }
-  }
-
-  // FETCH Handling Charge
-  Future<void> fetchHandlingCharge() async {
-    try {
-      final url = Uri.parse(
-          ApiConstants.GET_HANDLING_CHARGE + "?branch_id=$branchId");
-
-      final response = await http.get(url);
-      final data = json.decode(response.body);
-
-      if (data['success']) {
-        setState(() {
-          handling_charge = double.tryParse(
-              data['data']['amount']?.toString() ?? '0') ?? 0.0;
-        });
-      } else {
-        setState(() {
-          handling_charge = 0.0;
-        });
-      }
-    } catch (e) {
-      setState(() {
-        handling_charge = 0.0;
-      });
+      if (mounted) setState(() => _hasGift = false);
     }
   }
 
   Future<void> fetchProductsByType(String type) async {
-    final url = Uri.parse(
-      "${ApiConstants.VIEW_PRODUCT_BY_TYPE}?type=$type&page=1&limit=10&branch_id=$branchId",
-    );
-
+    if (branchId.isEmpty) return;
     try {
-      final response = await http.get(url);
-      if (response.statusCode == 200) {
-        final body = jsonDecode(response.body);
-        if (body['success']) {
-          setState(() {
-            switch (type) {
-              case 'Everyday Essentials':
-                everydayEssentialsList = body['products'];
-                break;
-            }
-          });
-        }
-      }
+      final page = await Repos.products.list(
+        branchId: branchId,
+        tag: type,
+        limit: 10,
+      );
+      if (!mounted) return;
+      setState(() {
+        everydayEssentialsList = LegacyAdapters.products(page.items);
+      });
     } catch (e) {
       debugPrint("Error fetching $type products: $e");
     }
   }
 
-  Future<void> fetchUserData() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    String? user_ID = prefs.getString('user_id');
-    if (user_ID != null) {
-      setState(() => userId = user_ID);
-      await fetchCartItems(userId);
-    }
-  }
-
-  Future<void> fetchCartItems(String id) async {
-    if (branchId <= 0) {
-      setState(() {
-        cartItems = [];
-        isLoading = false;
-      });
+  Future<void> fetchCartItems() async {
+    if (branchId.isEmpty || userId.isEmpty) {
+      if (mounted) {
+        setState(() {
+          cartItems = [];
+          isLoading = false;
+        });
+      }
       return;
     }
 
-    final url = Uri.parse(
-        '${ApiConstants.GET_CART_ITEMS}?user_id=$id&branch_id=$branchId');
-
     try {
-      final response = await http.get(url);
-      final data = json.decode(response.body);
-
-      if (data['success'] == true) {
-        setState(() {
-          cartItems = data['cart'] as List;
-          itemCheckStates.clear();
-          for (var item in cartItems) {
-            itemCheckStates[item['id']] = true;
-          }
-          calculateTotal();
-          calculateTotalPrice();
-        });
-
-        _updateCartProvider(id);
-      } else {
-        setState(() {
-          cartItems = [];
-        });
-
-        // 🔥 provider bhi clear
-        Provider.of<CartProvider>(context, listen: false).clearCart(id);
-      }
-    } catch (e) {
-      Provider.of<CartProvider>(context, listen: false).clearCart(id);
-    } finally {
+      final Cart cart = await Repos.cart.getCart(branchId);
+      if (!mounted) return;
       setState(() {
-        isLoading = false;
+        cartItems = cart.items;
+        totalSellingAmount = cart.itemsTotal;
+        totalPriceAmount = cart.itemsTotal + cart.savings;
       });
+      _checkCouponValidity();
+    } catch (e) {
+      debugPrint('Error fetching cart: $e');
+      if (mounted) setState(() => cartItems = []);
+    } finally {
+      if (mounted) setState(() => isLoading = false);
     }
   }
 
-  void _updateCartProvider(String userId) {
-    final cartProvider = Provider.of<CartProvider>(context, listen: false);
-
-    for (var item in cartItems) {
-      final productId = item['product_id']?.toString() ?? '';
-      final variantId = item['variant_id']?.toString() ?? '';
-      final quantity = int.tryParse(item['quantity']?.toString() ?? '1') ?? 1;
-      final cartId = item['id'];
-
-      cartProvider.updateCartQuantities(
-        userId,
-        productId,
-        variantId,
-        quantity,
-        cartId,
-      );
-    }
-  }
-
-  // Add this method to apply coupon by code
+  // Apply a coupon by typed code through the backend validator.
   Future<void> _applyCouponByCode() async {
     if (_couponController.text.isEmpty) {
       Fluttertoast.showToast(
@@ -454,33 +237,32 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
       return;
     }
 
-    setState(() {
-      _isApplyingCoupon = true;
-    });
+    setState(() => _isApplyingCoupon = true);
 
     try {
-      final response = await http.get(
-        Uri.parse(
-            '${ApiConstants.VALIDATE_COUPON}?code=${_couponController.text}'),
+      final CouponValidation result = await Repos.coupons.validate(
+        branchId: branchId,
+        code: _couponController.text.trim(),
+        amount: totalSellingAmount,
       );
 
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-
-        if (data['success'] == true) {
-          final coupon = data['data'];
-          _applyCoupon(coupon);
-          _couponController.clear();
-        } else {
-          Fluttertoast.showToast(
-            msg: data['message'] ?? "Invalid coupon code",
-            toastLength: Toast.LENGTH_SHORT,
-            gravity: ToastGravity.BOTTOM,
-            backgroundColor: Colors.red,
-            textColor: Colors.white,
-            fontSize: 14.sp,
-          );
-        }
+      if (result.valid) {
+        _applyValidatedCoupon(
+          code: result.code ?? _couponController.text.trim(),
+          discount: result.discount,
+          minAmount: result.minAmount ?? 0.0,
+        );
+        _couponController.clear();
+        if (mounted) Navigator.pop(context);
+      } else {
+        Fluttertoast.showToast(
+          msg: result.failureMessage,
+          toastLength: Toast.LENGTH_SHORT,
+          gravity: ToastGravity.BOTTOM,
+          backgroundColor: Colors.red,
+          textColor: Colors.white,
+          fontSize: 14.sp,
+        );
       }
     } catch (e) {
       Fluttertoast.showToast(
@@ -492,9 +274,7 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
         fontSize: 14.sp,
       );
     } finally {
-      setState(() {
-        _isApplyingCoupon = false;
-      });
+      if (mounted) setState(() => _isApplyingCoupon = false);
     }
   }
 
@@ -502,7 +282,6 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
     setState(() {
       selectedCodeName = null;
       selectedDiscount = 0.0;
-      selectedExpiry = null;
       selectedMinAmount = 0.0;
     });
 
@@ -516,231 +295,62 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
     );
   }
 
-  void calculateTotal() {
-    double total = 0.0;
-    for (var item in cartItems) {
-      if (itemCheckStates[item['id']] ?? true) {
-        final price =
-            double.tryParse(item['selling_price']?.toString() ?? '0') ?? 0;
-        final quantity = int.tryParse(item['quantity']?.toString() ?? '1') ?? 1;
-        total += price * quantity;
-      }
-    }
+  void _applyValidatedCoupon({
+    required String code,
+    required double discount,
+    required double minAmount,
+  }) {
     setState(() {
-      totalSellingAmount = total;
-    });
-
-    // Check if coupon is still valid after cart total change
-    _checkCouponValidity();
-  }
-
-  void calculateTotalPrice() {
-    double total = 0.0;
-    for (var item in cartItems) {
-      if (itemCheckStates[item['id']] ?? true) {
-        final price = double.tryParse(item['price']?.toString() ?? '0') ?? 0;
-        final quantity = int.tryParse(item['quantity']?.toString() ?? '1') ?? 1;
-        total += price * quantity;
-      }
-    }
-    setState(() {
-      totalPriceAmount = total;
-    });
-  }
-
-  Future<void> _fetchCoupons() async {
-    try {
-      final response = await http.get(Uri.parse(ApiConstants.VIEW_COUPON));
-      if (response.statusCode == 200) {
-        final decoded = jsonDecode(response.body);
-        if (decoded['success'] == true && decoded['data'] is List) {
-          setState(() => _couponList =
-          List<Map<String, dynamic>>.from(decoded['data']));
-        }
-      }
-    } catch (e) {
-      debugPrint("Error fetching coupons: $e");
-    }
-  }
-
-  Future<void> updateQuantity(int cartItemId, int newQuantity) async {
-    if (newQuantity < 1) return;
-
-    try {
-      // 🟢 Find item from cart
-      final item = cartItems.firstWhere(
-            (item) => item['id'] == cartItemId,
-        orElse: () => null,
-      );
-
-      if (item != null) {
-        final stock =
-        item['stock'] != null ? int.parse(item['stock'].toString()) : 0;
-        final currentQuantity =
-            int.tryParse(item['quantity']?.toString() ?? '0') ?? 0;
-
-        // 🟢 Stock check only when increasing
-        if (newQuantity > currentQuantity && newQuantity > stock) {
-          Fluttertoast.showToast(
-            msg: "Only $stock items available in stock",
-            toastLength: Toast.LENGTH_SHORT,
-            gravity: ToastGravity.BOTTOM,
-            backgroundColor: Colors.red,
-            textColor: Colors.white,
-          );
-          return; // ❌ Stop execution if trying to exceed stock
-        }
-      }
-
-      // 🟢 Update API call
-      final url = Uri.parse(ApiConstants.UPDATE_QUANTITY);
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: json.encode({'id': cartItemId, 'quantity': newQuantity}),
-      );
-
-      final data = json.decode(response.body);
-      if (data['success']) {
-        await fetchCartItems(userId);
-
-        // Update provider after successful API
-        if (item != null) {
-          final productId = item['product_id']?.toString() ?? '';
-          final variantId = item['variant_id']?.toString() ?? '';
-
-          final cartProvider =
-          Provider.of<CartProvider>(context, listen: false);
-          cartProvider.updateCartQuantities(
-            userId,
-            productId,
-            variantId,
-            newQuantity,
-            cartItemId,
-          );
-        }
-      } else {
-        Fluttertoast.showToast(
-          msg: "Failed to update quantity",
-          toastLength: Toast.LENGTH_SHORT,
-          gravity: ToastGravity.BOTTOM,
-          backgroundColor: Colors.red,
-          textColor: Colors.white,
-        );
-      }
-    } catch (e) {
-      print('Error updating quantity: $e');
-      Fluttertoast.showToast(
-        msg: "Network error. Please try again.",
-        toastLength: Toast.LENGTH_SHORT,
-        gravity: ToastGravity.BOTTOM,
-        backgroundColor: Colors.red,
-        textColor: Colors.white,
-      );
-    }
-  }
-
-  Future<void> removeItem(int cartItemId) async {
-    try {
-      final item = cartItems.firstWhere(
-            (item) => item['id'] == cartItemId,
-        orElse: () => null,
-      );
-
-      if (item == null) return;
-
-      final productId = item['product_id']?.toString() ?? '';
-      final variantId = item['variant_id']?.toString() ?? '';
-
-      final url = Uri.parse('${ApiConstants.REMOVE_CART_ITEM}?id=$cartItemId');
-      final response = await http.get(url);
-      final data = json.decode(response.body);
-
-      if (data['success']) {
-        // 🟢 Pehle provider me se hatao
-        final cartProvider =
-        Provider.of<CartProvider>(context, listen: false);
-        cartProvider.removeCartItem(
-          userId,
-          productId,
-          variantId,
-        );
-
-        // 🟢 Ab server se refresh karo (taaki sync bana rahe)
-        await fetchCartItems(userId);
-      }
-    } catch (e) {
-      print('Error removing item: $e');
-    }
-  }
-
-  // Check if coupon is expired
-  bool _isCouponExpired(String expiryDate) {
-    try {
-      final parts = expiryDate.split('-');
-      if (parts.length == 3) {
-        final day = int.tryParse(parts[0]) ?? 0;
-        final month = int.tryParse(parts[1]) ?? 0;
-        final year = int.tryParse(parts[2]) ?? 0;
-
-        final expiry = DateTime(year, month, day);
-        return DateTime.now().isAfter(expiry);
-      }
-      return true;
-    } catch (e) {
-      return true;
-    }
-  }
-
-  // Apply coupon with validation
-  void _applyCoupon(Map<String, dynamic> coupon) {
-    // Check if coupon is expired
-    if (_isCouponExpired(coupon['expri_date'])) {
-      Fluttertoast.showToast(
-        msg: "Coupon has expired",
-        toastLength: Toast.LENGTH_SHORT,
-        gravity: ToastGravity.BOTTOM,
-        backgroundColor: Colors.red,
-        textColor: Colors.white,
-        fontSize: 14.sp,
-      );
-      return;
-    }
-
-    // Check if cart meets minimum amount requirement
-    final minAmount =
-        double.tryParse(coupon['min_amount']?.toString() ?? '0') ?? 0.0;
-    if (finalWithCharge < minAmount) {
-      Fluttertoast.showToast(
-        msg:
-        "Add products worth ₹${(minAmount - finalWithCharge).toStringAsFixed(0)} more to apply this coupon",
-        toastLength: Toast.LENGTH_SHORT,
-        gravity: ToastGravity.BOTTOM,
-        backgroundColor: Colors.red,
-        textColor: Colors.white,
-        fontSize: 14.sp,
-      );
-      return;
-    }
-
-    setState(() {
-      selectedCodeName = coupon['code_name'];
-      selectedDiscount =
-          double.tryParse(coupon['discount']?.toString() ?? '0') ?? 0.0;
-      selectedExpiry = coupon['expri_date'];
+      selectedCodeName = code;
+      selectedDiscount = discount;
       selectedMinAmount = minAmount;
     });
 
-    Navigator.pop(context);
-
     Fluttertoast.showToast(
-      msg: "Coupon Applied: ${coupon['code_name']}",
+      msg: "Coupon Applied: $code",
       toastLength: Toast.LENGTH_SHORT,
       gravity: ToastGravity.BOTTOM,
       backgroundColor: Colors.black87,
       textColor: Colors.white,
       fontSize: 14.sp,
     );
+  }
+
+  Future<void> updateQuantity(CartItem item, int newQuantity) async {
+    if (newQuantity < 1) return;
+
+    final cartProvider = Provider.of<CartProvider>(context, listen: false);
+    final ok = await cartProvider.changeQuantity(
+      userId: userId,
+      branchId: branchId,
+      productId: item.productId,
+      variantId: item.variantId ?? '',
+      quantity: newQuantity,
+    );
+    if (ok) {
+      await fetchCartItems();
+    } else {
+      Fluttertoast.showToast(
+        msg: "Failed to update quantity",
+        toastLength: Toast.LENGTH_SHORT,
+        gravity: ToastGravity.BOTTOM,
+        backgroundColor: Colors.red,
+        textColor: Colors.white,
+      );
+    }
+  }
+
+  Future<void> removeItem(CartItem item) async {
+    final cartProvider = Provider.of<CartProvider>(context, listen: false);
+    final ok = await cartProvider.removeItem(
+      userId: userId,
+      branchId: branchId,
+      productId: item.productId,
+      variantId: item.variantId ?? '',
+    );
+    if (ok) {
+      await fetchCartItems();
+    }
   }
 
   void _showGiftDetails() {
@@ -771,7 +381,7 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(10.r),
                     child: Image.network(
-                      ApiConstants.BASE_URL + '/gift/' + giftImage,
+                      giftImage,
                       width: 100.w,
                       height: 100.h,
                       fit: BoxFit.cover,
@@ -906,8 +516,6 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    final cartProvider = Provider.of<CartProvider>(context);
-
     return Scaffold(
       backgroundColor: AppColors.backgroundColor,
       body: isLoading
@@ -1023,17 +631,13 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                       Spacer(),
                       InkWell(
                         onTap: () async {
-                          // SearchProduct से वापस आने पर cart refresh करें
                           await Navigator.push(
                             context,
                             MaterialPageRoute(
                               builder: (context) => SearchProduct(),
                             ),
                           );
-                          // SearchProduct से वापस आने पर cart refresh करें
-                          if (userId.isNotEmpty) {
-                            await fetchCartItems(userId);
-                          }
+                          await _refreshCartData();
                         },
                         child: Padding(
                           padding: EdgeInsets.only(left: 1.w),
@@ -1060,195 +664,196 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                       children: [
                         SizedBox(height: 14.h),
 
-                        // Gift Section
-                        Container(
-                          child: Column(
-                            children: [
-                              Padding(
-                                padding: EdgeInsets.only(
-                                  left: 16.w,
-                                  right: 16.w,
-                                ),
-                                child: Container(
-                                  width: double.infinity,
-                                  height: isGiftUnlocked
-                                      ? 100.h
-                                      : 78.h, // Increased height when unlocked
-                                  decoration: BoxDecoration(
-                                    color: AppColors.primaryColor
-                                        .withOpacity(0.1),
-                                    borderRadius:
-                                    BorderRadius.circular(10.r),
-                                    border: Border.all(
-                                      color: AppColors.lineColor,
-                                      width: 1.5,
-                                    ),
+                        // Gift Section (hidden when the branch has no gift)
+                        if (_hasGift)
+                          Container(
+                            child: Column(
+                              children: [
+                                Padding(
+                                  padding: EdgeInsets.only(
+                                    left: 16.w,
+                                    right: 16.w,
                                   ),
-                                  child: Row(
-                                    children: [
-                                      SizedBox(width: 10.w),
-                                      ClipRRect(
-                                        borderRadius:
-                                        BorderRadius.circular(10.r),
-                                        child: Image.network(
-                                          giftImage.isNotEmpty
-                                              ? giftImage
-                                              : 'assets/images/gift.png',
-                                          width: 60.w,
-                                          height: 60.h,
-                                          fit: BoxFit.cover,
-                                          errorBuilder: (_, __, ___) =>
-                                              Image.asset(
-                                                'assets/images/gift.png',
-                                                width: 60.w,
-                                                height: 60.h,
-                                              ),
-                                        ),
+                                  child: Container(
+                                    width: double.infinity,
+                                    height: isGiftUnlocked
+                                        ? 100.h
+                                        : 78.h, // Increased height when unlocked
+                                    decoration: BoxDecoration(
+                                      color: AppColors.primaryColor
+                                          .withOpacity(0.1),
+                                      borderRadius:
+                                      BorderRadius.circular(10.r),
+                                      border: Border.all(
+                                        color: AppColors.lineColor,
+                                        width: 1.5,
                                       ),
-                                      Expanded(
-                                        child: Padding(
-                                          padding: EdgeInsets.only(
-                                            left: 10.w,
-                                            top: 12.h,
-                                          ),
-                                          child: Column(
-                                            crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                            children: [
-                                              Text(
-                                                isGiftUnlocked
-                                                    ? 'Congratulations! You unlocked a gift! 🎁'
-                                                    : 'Special Deal! Buy for ₹${giftTarget.toStringAsFixed(0)} and\nget a surprise gift.',
-                                                style: GoogleFonts.jost(
-                                                  height: 1.2,
-                                                  fontWeight:
-                                                  FontWeight.w500,
-                                                  fontSize: 11.sp,
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        SizedBox(width: 10.w),
+                                        ClipRRect(
+                                          borderRadius:
+                                          BorderRadius.circular(10.r),
+                                          child: Image.network(
+                                            giftImage.isNotEmpty
+                                                ? giftImage
+                                                : 'assets/images/gift.png',
+                                            width: 60.w,
+                                            height: 60.h,
+                                            fit: BoxFit.cover,
+                                            errorBuilder: (_, __, ___) =>
+                                                Image.asset(
+                                                  'assets/images/gift.png',
+                                                  width: 60.w,
+                                                  height: 60.h,
                                                 ),
-                                              ),
-                                              SizedBox(height: 5.h),
-                                              Row(
-                                                children: [
-                                                  ClipRRect(
-                                                    borderRadius:
-                                                    BorderRadius
-                                                        .circular(
-                                                        10.r),
-                                                    child: Image.asset(
-                                                      'assets/images/girt_icon.png',
-                                                      width: 26.w,
-                                                      height: 26.h,
-                                                    ),
+                                          ),
+                                        ),
+                                        Expanded(
+                                          child: Padding(
+                                            padding: EdgeInsets.only(
+                                              left: 10.w,
+                                              top: 12.h,
+                                            ),
+                                            child: Column(
+                                              crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                              children: [
+                                                Text(
+                                                  isGiftUnlocked
+                                                      ? 'Congratulations! You unlocked a gift! 🎁'
+                                                      : 'Special Deal! Buy for ₹${giftTarget.toStringAsFixed(0)} and\nget a surprise gift.',
+                                                  style: GoogleFonts.jost(
+                                                    height: 1.2,
+                                                    fontWeight:
+                                                    FontWeight.w500,
+                                                    fontSize: 11.sp,
                                                   ),
-                                                  SizedBox(width: 7.w),
-                                                  Expanded(
-                                                    child: Column(
-                                                      mainAxisAlignment:
-                                                      MainAxisAlignment
-                                                          .start,
-                                                      crossAxisAlignment:
-                                                      CrossAxisAlignment
-                                                          .start,
-                                                      children: [
-                                                        Text(
-                                                          isGiftUnlocked
-                                                              ? 'You have earned: $giftName'
-                                                              : 'Add products worth ₹${remainingAmount.toStringAsFixed(0)} more',
-                                                          style: GoogleFonts
-                                                              .jost(
-                                                            height: 1.1,
-                                                            fontWeight:
-                                                            FontWeight
-                                                                .w400,
-                                                            fontSize:
-                                                            11.sp,
-                                                            color: AppColors
-                                                                .secondaryTextColor,
+                                                ),
+                                                SizedBox(height: 5.h),
+                                                Row(
+                                                  children: [
+                                                    ClipRRect(
+                                                      borderRadius:
+                                                      BorderRadius
+                                                          .circular(
+                                                          10.r),
+                                                      child: Image.asset(
+                                                        'assets/images/girt_icon.png',
+                                                        width: 26.w,
+                                                        height: 26.h,
+                                                      ),
+                                                    ),
+                                                    SizedBox(width: 7.w),
+                                                    Expanded(
+                                                      child: Column(
+                                                        mainAxisAlignment:
+                                                        MainAxisAlignment
+                                                            .start,
+                                                        crossAxisAlignment:
+                                                        CrossAxisAlignment
+                                                            .start,
+                                                        children: [
+                                                          Text(
+                                                            isGiftUnlocked
+                                                                ? 'You have earned: $giftName'
+                                                                : 'Add products worth ₹${remainingAmount.toStringAsFixed(0)} more',
+                                                            style: GoogleFonts
+                                                                .jost(
+                                                              height: 1.1,
+                                                              fontWeight:
+                                                              FontWeight
+                                                                  .w400,
+                                                              fontSize:
+                                                              11.sp,
+                                                              color: AppColors
+                                                                  .secondaryTextColor,
+                                                            ),
                                                           ),
-                                                        ),
-                                                        if (isGiftUnlocked)
-                                                          SizedBox(
-                                                              height: 5.h),
-                                                        if (isGiftUnlocked)
-                                                          InkWell(
-                                                            onTap: () {
-                                                              _showGiftDetails();
-                                                            },
-                                                            child:
-                                                            Container(
-                                                              padding: EdgeInsets
-                                                                  .symmetric(
-                                                                horizontal:
-                                                                10.w,
-                                                                vertical:
-                                                                4.h,
-                                                              ),
-                                                              decoration:
-                                                              BoxDecoration(
-                                                                color: AppColors
-                                                                    .primaryColor,
-                                                                borderRadius:
-                                                                BorderRadius.circular(5.r),
-                                                              ),
+                                                          if (isGiftUnlocked)
+                                                            SizedBox(
+                                                                height: 5.h),
+                                                          if (isGiftUnlocked)
+                                                            InkWell(
+                                                              onTap: () {
+                                                                _showGiftDetails();
+                                                              },
                                                               child:
-                                                              Text(
-                                                                'View Gift',
-                                                                style: GoogleFonts
-                                                                    .jost(
-                                                                  fontSize:
-                                                                  10.sp,
+                                                              Container(
+                                                                padding: EdgeInsets
+                                                                    .symmetric(
+                                                                  horizontal:
+                                                                  10.w,
+                                                                  vertical:
+                                                                  4.h,
+                                                                ),
+                                                                decoration:
+                                                                BoxDecoration(
                                                                   color: AppColors
-                                                                      .primaryTextColor,
-                                                                  fontWeight:
-                                                                  FontWeight.w500,
+                                                                      .primaryColor,
+                                                                  borderRadius:
+                                                                  BorderRadius.circular(5.r),
+                                                                ),
+                                                                child:
+                                                                Text(
+                                                                  'View Gift',
+                                                                  style: GoogleFonts
+                                                                      .jost(
+                                                                    fontSize:
+                                                                    10.sp,
+                                                                    color: AppColors
+                                                                        .primaryTextColor,
+                                                                    fontWeight:
+                                                                    FontWeight.w500,
+                                                                  ),
                                                                 ),
                                                               ),
                                                             ),
-                                                          ),
-                                                      ],
+                                                        ],
+                                                      ),
                                                     ),
-                                                  ),
-                                                ],
-                                              ),
-                                            ],
+                                                  ],
+                                                ),
+                                              ],
+                                            ),
                                           ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                Transform.translate(
+                                  offset: Offset(45.w, -15.h),
+                                  child: Stack(
+                                    children: [
+                                      Container(
+                                        width: 185.w,
+                                        height: 3.4.h,
+                                        decoration: BoxDecoration(
+                                          color: Colors.grey.shade300,
+                                          borderRadius:
+                                          BorderRadius.circular(2.r),
+                                        ),
+                                      ),
+                                      Container(
+                                        width: 185.w * progressValue,
+                                        height: 3.4.h,
+                                        decoration: BoxDecoration(
+                                          color: totalSellingAmount >=
+                                              giftTarget
+                                              ? Colors.green
+                                              : AppColors.primaryColor,
+                                          borderRadius:
+                                          BorderRadius.circular(2.r),
                                         ),
                                       ),
                                     ],
                                   ),
                                 ),
-                              ),
-                              Transform.translate(
-                                offset: Offset(45.w, -15.h),
-                                child: Stack(
-                                  children: [
-                                    Container(
-                                      width: 185.w,
-                                      height: 3.4.h,
-                                      decoration: BoxDecoration(
-                                        color: Colors.grey.shade300,
-                                        borderRadius:
-                                        BorderRadius.circular(2.r),
-                                      ),
-                                    ),
-                                    Container(
-                                      width: 185.w * progressValue,
-                                      height: 3.4.h,
-                                      decoration: BoxDecoration(
-                                        color: totalSellingAmount >=
-                                            giftTarget
-                                            ? Colors.green
-                                            : AppColors.primaryColor,
-                                        borderRadius:
-                                        BorderRadius.circular(2.r),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
-                        ),
                         Padding(
                           padding: EdgeInsets.all(14.h),
                           child: Container(
@@ -1311,26 +916,15 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                                   NeverScrollableScrollPhysics(),
                                   itemBuilder: (context, index) {
                                     final item = cartItems[index];
-                                    final productName =
-                                        item['name'] ?? '';
+                                    final productName = item.productName;
                                     final variantName =
-                                        item['variant_name'] ?? '';
-                                    final price = double.tryParse(
-                                        item['price']?.toString() ??
-                                            '0') ??
-                                        0;
-                                    final sellingPrice = double.tryParse(
-                                        item['selling_price']
-                                            ?.toString() ??
-                                            '0') ??
-                                        0;
-                                    final quantity = int.tryParse(
-                                        item['quantity']
-                                            ?.toString() ??
-                                            '1') ??
-                                        1;
-                                    final cartItemId = item['id'];
-                                    final imageUlr = item['image_url'];
+                                        item.variantName ?? '';
+                                    final sellingPrice = item.unitPrice;
+                                    // The new cart returns the unit (selling)
+                                    // price; MRP/strike-through is not exposed
+                                    // per line, so we show selling price only.
+                                    final price = sellingPrice;
+                                    final quantity = item.quantity;
 
                                     final discountPercentage = price > 0
                                         ? ((price - sellingPrice) /
@@ -1378,60 +972,54 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                                                       .circular(
                                                       12.r),
                                                   child: Center(
-                                                    child:
-                                                    Image.network(
-                                                      imageUlr,
-                                                      width: 30.w,
-                                                      height: 30.h,
-                                                      fit: BoxFit
-                                                          .contain,
-                                                      errorBuilder: (_,
-                                                          __, ___) =>
-                                                          Icon(
-                                                            Icons.image,
-                                                            size: 24.sp,
-                                                          ),
-                                                    ),
-                                                  ),
-                                                ),
-                                              ),
-                                              Positioned(
-                                                child: Container(
-                                                  padding: EdgeInsets
-                                                      .symmetric(
-                                                    horizontal: 6.w,
-                                                    vertical: 2.h,
-                                                  ),
-                                                  decoration:
-                                                  BoxDecoration(
-                                                    color: AppColors
-                                                        .secondaryColor,
-                                                    borderRadius:
-                                                    BorderRadius
-                                                        .only(
-                                                      bottomRight:
-                                                      Radius
-                                                          .circular(
-                                                          10.r),
-                                                      topLeft: Radius
-                                                          .circular(
-                                                          10.r),
-                                                    ),
-                                                  ),
-                                                  child: Text(
-                                                    '$discountPercentage%\nOFF',
-                                                    style: GoogleFonts
-                                                        .jost(
-                                                      fontSize: 5.sp,
+                                                    child: Icon(
+                                                      Icons
+                                                          .shopping_bag_outlined,
+                                                      size: 24.sp,
                                                       color: AppColors
-                                                          .primaryTextColor,
-                                                      fontWeight:
-                                                      FontWeight
-                                                          .w400,
+                                                          .primaryColor,
                                                     ),
                                                   ),
                                                 ),
                                               ),
+                                              if (discountPercentage > 0)
+                                                Positioned(
+                                                  child: Container(
+                                                    padding: EdgeInsets
+                                                        .symmetric(
+                                                      horizontal: 6.w,
+                                                      vertical: 2.h,
+                                                    ),
+                                                    decoration:
+                                                    BoxDecoration(
+                                                      color: AppColors
+                                                          .secondaryColor,
+                                                      borderRadius:
+                                                      BorderRadius
+                                                          .only(
+                                                        bottomRight:
+                                                        Radius
+                                                            .circular(
+                                                            10.r),
+                                                        topLeft: Radius
+                                                            .circular(
+                                                            10.r),
+                                                      ),
+                                                    ),
+                                                    child: Text(
+                                                      '$discountPercentage%\nOFF',
+                                                      style: GoogleFonts
+                                                          .jost(
+                                                        fontSize: 5.sp,
+                                                        color: AppColors
+                                                            .primaryTextColor,
+                                                        fontWeight:
+                                                        FontWeight
+                                                            .w400,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
                                             ],
                                           ),
                                           SizedBox(width: 10.w),
@@ -1507,12 +1095,12 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                                                       if (quantity >
                                                           1) {
                                                         updateQuantity(
-                                                            cartItemId,
+                                                            item,
                                                             quantity -
                                                                 1);
                                                       } else {
                                                         removeItem(
-                                                            cartItemId);
+                                                            item);
                                                       }
                                                     },
                                                     padding:
@@ -1541,7 +1129,7 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                                                     ),
                                                     onPressed: () {
                                                       updateQuantity(
-                                                          cartItemId,
+                                                          item,
                                                           quantity +
                                                               1);
                                                     },
@@ -1555,7 +1143,6 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                                           ),
                                           Spacer(),
                                           // Price
-                                          // Price
                                           Column(
                                             children: [
                                               Text(
@@ -1568,7 +1155,6 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                                                 ),
                                               ),
 
-                                              // ✅ LineThrough sirf tab dikhana jab discount > 0
                                               if (discountPercentage >
                                                   0)
                                                 Text(
@@ -1660,7 +1246,6 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                                     ),
                                     Spacer(),
 
-                                    // ✅ sirf tab dikhao jab discount ho
                                     if (totalPriceAmount >
                                         totalSellingAmount)
                                       Text(
@@ -1781,7 +1366,7 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                                           null) ...[
                                         SizedBox(width: 8.w),
                                         Text(
-                                          "$selectedCodeName  (${selectedDiscount.toStringAsFixed(0)}% OFF)",
+                                          "$selectedCodeName  (₹${selectedDiscount.toStringAsFixed(0)} OFF)",
                                           style: GoogleFonts.jost(
                                             fontWeight:
                                             FontWeight.w600,
@@ -1790,15 +1375,14 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                                           ),
                                         ),
                                         SizedBox(width: 8.w),
-                                        // Add remove coupon button
-                                        // InkWell(
-                                        //   onTap: _removeCoupon,
-                                        //   child: Icon(
-                                        //     Icons.close,
-                                        //     size: 16.sp,
-                                        //     color: Colors.red,
-                                        //   ),
-                                        // ),
+                                        InkWell(
+                                          onTap: _removeCoupon,
+                                          child: Icon(
+                                            Icons.close,
+                                            size: 16.sp,
+                                            color: Colors.red,
+                                          ),
+                                        ),
                                       ] else ...[
                                         SizedBox(width: 8.w),
                                         Text(
@@ -1808,7 +1392,7 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                                             fontWeight:
                                             FontWeight.w500,
                                             color: AppColors
-                                                .primaryTextColor,
+                                                .secondaryTextColor,
                                             fontSize: 12.sp,
                                           ),
                                         ),
@@ -1890,7 +1474,6 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                           ),
                           child: InkWell(
                             onTap: () async {
-                              // SearchProduct से वापस आने पर cart refresh करें
                               await Navigator.push(
                                 context,
                                 MaterialPageRoute(
@@ -1898,10 +1481,7 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                                       SearchProduct(),
                                 ),
                               );
-                              // SearchProduct से वापस आने पर cart refresh करें
-                              if (userId.isNotEmpty) {
-                                await fetchCartItems(userId);
-                              }
+                              await _refreshCartData();
                             },
                             child: Container(
                               width: double.infinity,
@@ -2038,17 +1618,16 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                                 userId: userId,
                                 userEmail: userEmail.toString(),
                                 userName: userName.toString(),
-                                giftName: totalSellingAmount >=
-                                    giftTarget
-                                    ? giftName +
-                                    'Rs' +
-                                    giftPrice.toString()
-                                    : "noGift", // यहाँ change किया है
+                                giftName: (_hasGift &&
+                                    totalSellingAmount >=
+                                        giftTarget)
+                                    ? giftName
+                                    : "noGift",
                                 deliveyCharge: actualDeliveryCharge,
                                 handlingCharge: handling_charge,
                                 coupon_code_name:
-                                selectedCodeName.toString(),
-                                branch_id: branchId,
+                                selectedCodeName ?? '',
+                                branch_id: int.tryParse(branchId.toString()) ?? 0,
                               ),
                             ),
                           );
@@ -2131,10 +1710,7 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                     userId: userId,
                     branchId: branchId,
                     onCartUpdated: () {
-                      // Cart update होने पर real-time refresh
-                      if (userId.isNotEmpty) {
-                        fetchCartItems(userId);
-                      }
+                      _refreshCartData();
                     },
                   );
                 },
@@ -2151,7 +1727,6 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
       setState(() {
         selectedCodeName = null;
         selectedDiscount = 0.0;
-        selectedExpiry = null;
         selectedMinAmount = 0.0;
       });
 
@@ -2176,148 +1751,169 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
         borderRadius: BorderRadius.vertical(top: Radius.circular(16.r)),
       ),
       builder: (context) {
-        return SizedBox(
-          height: MediaQuery.of(context).size.height * 0.7,
-          child: Column(
-            children: [
-              SizedBox(height: 10.h),
-              Container(
-                width: 50.w,
-                height: 4.h,
-                decoration: BoxDecoration(
-                    color: Colors.grey[400],
-                    borderRadius: BorderRadius.circular(10)),
-              ),
-              SizedBox(height: 15.h),
-              Text("Available Coupons",
-                  style: GoogleFonts.jost(
-                      fontSize: 16.sp, fontWeight: FontWeight.w700)),
+        return FutureBuilder<List<Map<String, dynamic>>>(
+          future: Repos.coupons.available(branchId).then(
+              (raw) => raw.map(LegacyAdapters.coupon).toList()),
+          builder: (context, snapshot) {
+            final coupons = snapshot.data ?? const <Map<String, dynamic>>[];
+            return SizedBox(
+              height: MediaQuery.of(context).size.height * 0.7,
+              child: Column(
+                children: [
+                  SizedBox(height: 10.h),
+                  Container(
+                    width: 50.w,
+                    height: 4.h,
+                    decoration: BoxDecoration(
+                        color: Colors.grey[400],
+                        borderRadius: BorderRadius.circular(10)),
+                  ),
+                  SizedBox(height: 15.h),
+                  Text("Available Coupons",
+                      style: GoogleFonts.jost(
+                          fontSize: 16.sp, fontWeight: FontWeight.w700)),
 
-              // Add coupon code input field
-              Padding(
-                padding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 10.h),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Container(
-                        decoration: BoxDecoration(
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.05),
-                              blurRadius: 4,
-                              offset: const Offset(0, 2),
-                            )
-                          ],
-                        ),
-                        child: TextField(
-                          controller: _couponController,
-                          decoration: InputDecoration(
-                            hintText: "Enter coupon code",
-                            hintStyle:
-                            GoogleFonts.jost(color: Colors.grey.shade600),
-                            filled: true,
-                            fillColor: Colors.white,
-                            contentPadding: EdgeInsets.symmetric(
-                                horizontal: 16.w, vertical: 14.h),
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12.r),
-                              borderSide: BorderSide.none,
+                  // Coupon code input field
+                  Padding(
+                    padding:
+                    EdgeInsets.symmetric(horizontal: 16.w, vertical: 10.h),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Container(
+                            decoration: BoxDecoration(
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.05),
+                                  blurRadius: 4,
+                                  offset: const Offset(0, 2),
+                                )
+                              ],
                             ),
-                            enabledBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12.r),
-                              borderSide: BorderSide.none,
-                            ),
-                            focusedBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12.r),
-                              borderSide: BorderSide(
-                                  color: AppColors.primaryColor, width: 1.5),
+                            child: TextField(
+                              controller: _couponController,
+                              decoration: InputDecoration(
+                                hintText: "Enter coupon code",
+                                hintStyle: GoogleFonts.jost(
+                                    color: Colors.grey.shade600),
+                                filled: true,
+                                fillColor: Colors.white,
+                                contentPadding: EdgeInsets.symmetric(
+                                    horizontal: 16.w, vertical: 14.h),
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12.r),
+                                  borderSide: BorderSide.none,
+                                ),
+                                enabledBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12.r),
+                                  borderSide: BorderSide.none,
+                                ),
+                                focusedBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12.r),
+                                  borderSide: BorderSide(
+                                      color: AppColors.primaryColor,
+                                      width: 1.5),
+                                ),
+                              ),
+                              style: GoogleFonts.jost(fontSize: 14.sp),
                             ),
                           ),
-                          style: GoogleFonts.jost(fontSize: 14.sp),
                         ),
-                      ),
+                        SizedBox(width: 10.w),
+                        _isApplyingCoupon
+                            ? Container(
+                          padding: EdgeInsets.all(8.w),
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor:
+                            AlwaysStoppedAnimation<Color>(
+                                Theme.of(context).primaryColor),
+                          ),
+                        )
+                            : Container(
+                          decoration: BoxDecoration(
+                            borderRadius:
+                            BorderRadius.circular(12.r),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Theme.of(context)
+                                    .primaryColor
+                                    .withOpacity(0.3),
+                                blurRadius: 4,
+                                offset: const Offset(0, 2),
+                              )
+                            ],
+                          ),
+                          child: ElevatedButton(
+                            onPressed: _applyCouponByCode,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor:
+                              AppColors.primaryColor,
+                              foregroundColor:
+                              AppColors.primaryTextColor,
+                              padding: EdgeInsets.symmetric(
+                                  horizontal: 16.w,
+                                  vertical: 14.h),
+                              shape: RoundedRectangleBorder(
+                                borderRadius:
+                                BorderRadius.circular(12.r),
+                              ),
+                              elevation: 0,
+                            ),
+                            child: Text(
+                              "Apply",
+                              style: GoogleFonts.jost(
+                                fontSize: 14.sp,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                    SizedBox(width: 10.w),
-                    _isApplyingCoupon
-                        ? Container(
-                      padding: EdgeInsets.all(8.w),
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        valueColor: AlwaysStoppedAnimation<Color>(
-                            Theme.of(context).primaryColor),
-                      ),
-                    )
-                        : Container(
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(12.r),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Theme.of(context)
-                                .primaryColor
-                                .withOpacity(0.3),
-                            blurRadius: 4,
-                            offset: const Offset(0, 2),
-                          )
-                        ],
-                      ),
-                      child: ElevatedButton(
-                        onPressed: _applyCouponByCode,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: AppColors.primaryColor,
-                          foregroundColor: AppColors.primaryTextColor,
-                          padding: EdgeInsets.symmetric(
-                              horizontal: 16.w, vertical: 14.h),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12.r),
-                          ),
-                          elevation: 0,
-                        ),
-                        child: Text(
-                          "Apply",
-                          style: GoogleFonts.jost(
-                            fontSize: 14.sp,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
+                  ),
+                  SizedBox(height: 10.h),
+                  Expanded(
+                    child: snapshot.connectionState ==
+                        ConnectionState.waiting
+                        ? Center(
+                        child: CircularProgressIndicator(
+                            color: AppColors.primaryColor))
+                        : ListView.builder(
+                      padding: EdgeInsets.zero,
+                      itemCount: coupons.length,
+                      itemBuilder: (context, index) {
+                        final coupon = coupons[index];
+                        return InkWell(
+                          onTap: () {
+                            _couponController.text =
+                                coupon['code_name']?.toString() ?? '';
+                            _applyCouponByCode();
+                          },
+                          child: _buildCouponCard(coupon),
+                        );
+                      },
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-              SizedBox(height: 10.h),
-              Expanded(
-                child: ListView.builder(
-                  padding: EdgeInsets.zero,
-                  itemCount: _couponList.length,
-                  itemBuilder: (context, index) {
-                    final coupon = _couponList[index];
-                    return InkWell(
-                      onTap: () => _applyCoupon(coupon),
-                      child: _buildCouponCard(coupon),
-                    );
-                  },
-                ),
-              ),
-            ],
-          ),
+            );
+          },
         );
       },
     );
   }
 
   Widget _buildCouponCard(Map<String, dynamic> coupon) {
-    final isPrivate =
-        coupon['status'] == "Private" || coupon['status'] == 'Private';
+    final isPrivate = coupon['status'] == "Private";
 
-    // If coupon is private, return empty container (don't show it)
     if (isPrivate) {
       return Container();
     }
 
-    final isExpired = _isCouponExpired(coupon['expri_date']);
     final minAmount =
         double.tryParse(coupon['min_amount']?.toString() ?? '0') ?? 0.0;
-    final canApply = totalSellingAmount >= minAmount && !isExpired;
+    final canApply = totalSellingAmount >= minAmount;
 
     return Container(
       width: double.infinity,
@@ -2345,19 +1941,18 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                 const Spacer(),
                 Container(
                   decoration: BoxDecoration(
-                    color: isExpired ? Colors.red : AppColors.backgroundColor,
+                    color: AppColors.backgroundColor,
                     borderRadius: BorderRadius.circular(3.r),
                   ),
                   child: Padding(
                     padding:
                     EdgeInsets.symmetric(horizontal: 10.w, vertical: 2.h),
                     child: Center(
-                        child: Text(
-                            isExpired ? 'Expired' : 'Valid ${coupon['expri_date']}',
+                        child: Text('Valid ${coupon['expri_date']}',
                             style: GoogleFonts.jost(
                               fontSize: 10.sp,
                               fontWeight: FontWeight.w500,
-                              color: isExpired ? Colors.white : Colors.black,
+                              color: Colors.black,
                             ))),
                   ),
                 )
@@ -2383,19 +1978,19 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                         SvgPicture.asset('assets/svg/coupon.svg',
                             width: 18.w, color: AppColors.secondaryColor),
                         SizedBox(width: 4.w),
-                        Text(coupon['title'],
+                        Text(coupon['title']?.toString() ?? '',
                             style: GoogleFonts.jost(
                               fontWeight: FontWeight.bold,
                               fontSize: 12.sp,
                             ))
                       ],
                     ),
-                    Text(coupon['description'],
+                    Text(coupon['description']?.toString() ?? '',
                         style: GoogleFonts.jost(
                           fontWeight: FontWeight.w600,
                           fontSize: 12.sp,
                         )),
-                    if (!canApply && !isExpired)
+                    if (!canApply)
                       Text(
                         'Add ₹${(minAmount - totalSellingAmount).toStringAsFixed(0)} more to apply',
                         style: GoogleFonts.jost(
@@ -2418,7 +2013,7 @@ class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
                     ),
                     child: Center(
                       child: Text(
-                        coupon['code_name'],
+                        coupon['code_name']?.toString() ?? '',
                         style: GoogleFonts.jost(
                           fontSize: 12.sp,
                           color: Colors.green,

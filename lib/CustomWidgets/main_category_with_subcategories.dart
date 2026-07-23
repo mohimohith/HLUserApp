@@ -3,20 +3,19 @@ import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
 import '../CategoryViewScreen/categoryViewScreen.dart';
-import '../utils/api_constants.dart';
 import '../utils/responsive_helper.dart';
-import '../Provider/language_provider.dart'; // ✅ Import karo
+import '../Provider/language_provider.dart';
 
 class MainCategoryWithSubCategories extends StatelessWidget {
   final List<Map<String, dynamic>> mainCategoryList;
   final VoidCallback? onCategoryBack;
-  final int branchId;
+  final String branchId;
 
   const MainCategoryWithSubCategories({
     super.key,
     required this.mainCategoryList,
     this.onCategoryBack,
-    required this.branchId,
+    this.branchId = '',
   });
 
   // ✅ Helper method to get text based on language
@@ -172,12 +171,9 @@ class MainCategoryWithSubCategories extends StatelessWidget {
                             context,
                             MaterialPageRoute(
                               builder: (_) => CategoryViewScreen(
-                                categoryId: int.parse(
-                                  item['category_id'].toString(),
-                                ),
-                                categoryName: getSubCategoryName(context, item), // ✅ Language-specific name
+                                categoryId: item['category_id']?.toString() ?? '',
+                                categoryName: getSubCategoryName(context, item),
                                 categoryImage: item['category_image'],
-                                branchId: branchId,
                               ),
                             ),
                           );
@@ -205,7 +201,7 @@ class MainCategoryWithSubCategories extends StatelessWidget {
                               child: ClipRRect(
                                 borderRadius: BorderRadius.circular(10.r),
                                 child: Image.network(
-                                  ApiConstants.BASE_URL + "/category_api/${item['category_image']}",
+                                  item['category_image'] ?? '',
                                   fit: BoxFit.cover,
                                   errorBuilder: (_, __, ___) => Image.asset(
                                     "assets/images/placeholder_category.png",

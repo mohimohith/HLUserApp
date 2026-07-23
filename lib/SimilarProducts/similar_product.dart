@@ -1,15 +1,14 @@
-import 'dart:convert';
-import 'package:http/http.dart' as http;
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../BottomNav/Screens/cartScreen.dart';
 import '../Provider/cart_provider.dart';
 import '../CustomWidgets/product_card.dart';
 import '../SearchProduct/search_product.dart';
-import '../utils/api_constants.dart';
+import '../compat/app_state.dart';
+import '../compat/legacy_adapters.dart';
+import '../data/repositories/repositories.dart';
 import '../utils/colors.dart';
 
 class SimilarProduct extends StatefulWidget {
@@ -34,7 +33,7 @@ class _SimilarProductState extends State<SimilarProduct> {
   String userName = "";
   String userID = "";
 
-  int branchId = 0;
+  String branchId = '';
   String branchName  = "";
 
 
@@ -43,96 +42,58 @@ class _SimilarProductState extends State<SimilarProduct> {
   void initState() {
     super.initState();
     fetchUserData();
-    fetchAllProductsFromCategory(widget.category_id);
     fetchLocation();
   }
 
   Future<void> fetchLocation() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    String? uArea = prefs.getString('user_area_h');
-    String? uCity = prefs.getString('user_city_h');
-    int bId = prefs.getInt('selected_branch_id') ?? 0;
-    String? bName  = prefs.getString('selected_branch_name');
-
-    // agar dono me se koi ek bhi null na ho
-    if ((uArea != null && uArea.trim().isNotEmpty) ||
-        (uCity != null && uCity.trim().isNotEmpty)) {
-      setState(() {
-        branchId = bId;
-        branchName = bName ?? "";
-      });
-
-      // await  fetchProducts();
-    }
+    setState(() {
+      branchId = AppState.branchIdOrEmpty;
+      branchName = AppState.branchName ?? "";
+    });
+    await fetchAllProductsFromCategory(widget.category_id);
   }
 
 
 
   Future<void> fetchUserData() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    String? user_ID = prefs.getString('user_id');
-    if (user_ID != null) {
-      setState(() => userID = user_ID);
-      await fetchCartQuantity(user_ID);
-
+    final uid = AppState.userId;
+    if (uid.isNotEmpty) {
+      setState(() => userID = uid);
+      await fetchCartQuantity(uid);
     }
   }
 
 
-  /// ✅ Cart quantity fetch
+  /// Cart quantity fetch from server cart.
   Future<void> fetchCartQuantity(String id) async {
-    final url = Uri.parse(
-      '${ApiConstants.GET_CART_ITEMS}?user_id=$id',
-    );
     try {
-      final response = await http.get(url);
-      final data = json.decode(response.body);
-
-      if (data['success']) {
-        final cartItems = List<Map<String, dynamic>>.from(data['cart'] ?? []);
-        setState(() {
-          cartList = cartItems;
-        });
-      } else {
-        setState(() {
-          cartList = [];
-        });
-      }
-    } catch (e) {
+      final bid = AppState.branchIdOrEmpty;
+      if (bid.isEmpty) return;
+      final cart = await Repos.cart.getCart(bid);
       setState(() {
-        cartList = [];
+        cartList = cart.items.map((i) => {
+          'product_id': i.productId,
+          'variant_id': i.variantId ?? '',
+          'quantity': i.quantity,
+          'id': i.id,
+        }).toList();
       });
+    } catch (e) {
+      setState(() => cartList = []);
     }
   }
 
-  /// ✅ Products fetch
+  /// Products fetch by category.
   Future<void> fetchAllProductsFromCategory(String id) async {
     setState(() {
       _isLoadingProducts = true;
       products = [];
     });
-
-    final url = Uri.parse(
-      '${ApiConstants.VIEW_ALL_PRODUCTS_BY_CATEGORY}?category_id=$id',
-    );
-
     try {
-      final res = await http.get(url);
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body);
-
-        setState(() {
-          if (data is List) {
-            products = data;
-          } else if (data['products'] != null) {
-            products = data['products'];
-          } else {
-            products = [];
-          }
-        });
-      } else {
-        setState(() => products = []);
-      }
+      final res = await Repos.products.list(
+          branchId: branchId.isEmpty ? AppState.branchIdOrEmpty : branchId,
+          categoryId: id, page: 1, limit: 50);
+      setState(() => products = LegacyAdapters.products(res.items));
     } catch (e) {
       setState(() => products = []);
     } finally {
@@ -344,7 +305,7 @@ class _SimilarProductState extends State<SimilarProduct> {
           return ProductCard(
             product: product,
             userId: userID,
-            branchId: branchId,
+            branchId: branchId.toString(),
 
             onCartUpdated: () {
               fetchCartQuantity(userID); // ✅ Real-time update

@@ -11,6 +11,12 @@ class BranchSettings {
   final String? helpEmail;
   final String? helpWhatsapp;
 
+  /// Hex color (e.g. "#FF5722") for the home "Deliver in" text. Null → app default.
+  final String? textColor;
+
+  /// Whether to show the falling-rain animation over the home banner.
+  final bool rainEnabled;
+
   const BranchSettings({
     this.deliveryCharge = 0,
     this.handlingCharge = 0,
@@ -20,6 +26,8 @@ class BranchSettings {
     this.helpCallNumber,
     this.helpEmail,
     this.helpWhatsapp,
+    this.textColor,
+    this.rainEnabled = false,
   });
 
   /// Delivery charge after applying the free-delivery threshold for [subtotal].
@@ -38,5 +46,7 @@ class BranchSettings {
         helpCallNumber: asStringOrNull(j['helpCallNumber']),
         helpEmail: asStringOrNull(j['helpEmail']),
         helpWhatsapp: asStringOrNull(j['helpWhatsapp']),
+        textColor: asStringOrNull(j['textColor']),
+        rainEnabled: j['rainEnabled'] == true,
       );
 }
